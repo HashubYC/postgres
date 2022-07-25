@@ -1062,7 +1062,7 @@ exec_simple_query(const char *query_string)
 	 */
 	use_implicit_block = (list_length(parsetree_list) > 1);
 
-	/*
+	/* rewrite语法树
 	 * Run through the raw parsetree(s) and process each one.
 	 */
 	foreach(parsetree_item, parsetree_list)
