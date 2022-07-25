@@ -1016,7 +1016,7 @@ exec_simple_query(const char *query_string)
 	 * one of those, else bad things will happen in xact.c. (Note that this
 	 * will normally change current memory context.)
 	 */
-	start_xact_command();
+	start_xact_command(); // 启动事务
 
 	/*
 	 * Zap any pre-existing unnamed statement.  (While not strictly necessary,
@@ -1029,13 +1029,13 @@ exec_simple_query(const char *query_string)
 	/*
 	 * Switch to appropriate context for constructing parsetrees.
 	 */
-	oldcontext = MemoryContextSwitchTo(MessageContext);
+	oldcontext = MemoryContextSwitchTo(MessageContext); // 切换上下文
 
 	/*
 	 * Do basic parsing of the query or queries (this should be safe even if
 	 * we are in aborted transaction state!)
 	 */
-	parsetree_list = pg_parse_query(query_string);
+	parsetree_list = pg_parse_query(query_string); // 进行语法分析，生成语法树。不进行语义检查，只是简单的语义扫描
 
 	/* Log immediately if dictated by log_statement */
 	if (check_log_statement(parsetree_list))
