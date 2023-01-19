@@ -7,7 +7,7 @@
  * This gives R-tree behavior, with Guttman's poly-time split algorithm.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -797,8 +797,8 @@ gist_box_picksplit(PG_FUNCTION_ARGS)
 		for (i = 0; i < commonEntriesCount; i++)
 		{
 			box = DatumGetBoxP(entryvec->vector[commonEntries[i].index].key);
-			commonEntries[i].delta = Abs(float8_mi(box_penalty(leftBox, box),
-												   box_penalty(rightBox, box)));
+			commonEntries[i].delta = fabs(float8_mi(box_penalty(leftBox, box),
+													box_penalty(rightBox, box)));
 		}
 
 		/*

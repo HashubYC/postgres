@@ -3,7 +3,7 @@
  * xlogdesc.c
  *	  rmgr descriptor routines for access/transam/xlog.c
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -319,9 +319,9 @@ XLogRecGetBlockRefInfo(XLogReaderState *record, bool pretty,
 					*fpi_len += XLogRecGetBlock(record, block_id)->bimg_len;
 
 				if (XLogRecBlockImageApply(record, block_id))
-					appendStringInfo(buf, " FPW");
+					appendStringInfoString(buf, " FPW");
 				else
-					appendStringInfo(buf, " FPW for WAL verification");
+					appendStringInfoString(buf, " FPW for WAL verification");
 			}
 		}
 	}

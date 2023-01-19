@@ -19,6 +19,7 @@ OBJS = \
 	multixact.o \
 	parallel.o \
 	rmgr.o \
+	shell_restore.o \
 	slru.o \
 	subtrans.o \
 	timeline.o \
@@ -29,6 +30,7 @@ OBJS = \
 	xact.o \
 	xlog.o \
 	xlogarchive.o \
+	xlogbackup.o \
 	xlogfuncs.o \
 	xloginsert.o \
 	xlogprefetcher.o \

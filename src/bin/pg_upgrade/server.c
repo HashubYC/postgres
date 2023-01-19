@@ -3,7 +3,7 @@
  *
  *	database server functions
  *
- *	Copyright (c) 2010-2022, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/server.c
  */
 
@@ -212,7 +212,7 @@ start_postmaster(ClusterInfo *cluster, bool report_and_exit_on_error)
 
 	socket_string[0] = '\0';
 
-#if defined(HAVE_UNIX_SOCKETS) && !defined(WIN32)
+#if !defined(WIN32)
 	/* prevent TCP/IP connections, restrict socket access */
 	strcat(socket_string,
 		   " -c listen_addresses='' -c unix_socket_permissions=0700");

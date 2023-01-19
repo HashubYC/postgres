@@ -3,7 +3,7 @@
  *
  *	information support functions
  *
- *	Copyright (c) 2010-2022, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/info.c
  */
 
@@ -23,7 +23,7 @@ static void free_db_and_rel_infos(DbInfoArr *db_arr);
 static void get_db_infos(ClusterInfo *cluster);
 static void get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo);
 static void free_rel_infos(RelInfoArr *rel_arr);
-static void print_db_infos(DbInfoArr *dbinfo);
+static void print_db_infos(DbInfoArr *db_arr);
 static void print_rel_infos(RelInfoArr *rel_arr);
 
 
@@ -319,7 +319,7 @@ get_db_infos(ClusterInfo *cluster)
 
 	snprintf(query, sizeof(query),
 			 "SELECT d.oid, d.datname, d.encoding, d.datcollate, d.datctype, ");
-	if (GET_MAJOR_VERSION(old_cluster.major_version) < 1500)
+	if (GET_MAJOR_VERSION(cluster->major_version) < 1500)
 		snprintf(query + strlen(query), sizeof(query) - strlen(query),
 				 "'c' AS datlocprovider, NULL AS daticulocale, ");
 	else
@@ -408,11 +408,10 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	query[0] = '\0';			/* initialize query string to empty */
 
 	/*
-	 * Create a CTE that collects OIDs of regular user tables, including
-	 * matviews and sequences, but excluding toast tables and indexes.  We
-	 * assume that relations with OIDs >= FirstNormalObjectId belong to the
-	 * user.  (That's probably redundant with the namespace-name exclusions,
-	 * but let's be safe.)
+	 * Create a CTE that collects OIDs of regular user tables and matviews,
+	 * but excluding toast tables and indexes.  We assume that relations with
+	 * OIDs >= FirstNormalObjectId belong to the user.  (That's probably
+	 * redundant with the namespace-name exclusions, but let's be safe.)
 	 *
 	 * pg_largeobject contains user data that does not appear in pg_dump
 	 * output, so we have to copy that system table.  It's easiest to do that

@@ -5,7 +5,7 @@
  * Originally written by Tatsuo Ishii and enhanced by many contributors.
  *
  * src/bin/pgbench/pgbench.c
- * Copyright (c) 2000-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2023, PostgreSQL Global Development Group
  * ALL RIGHTS RESERVED;
  *
  * Permission to use, copy, modify, and distribute this software and its
@@ -27,8 +27,8 @@
  *
  */
 
-#ifdef WIN32
-#define FD_SETSIZE 1024			/* must set before winsock2.h is included */
+#if defined(WIN32) && FD_SETSIZE < 1024
+#error FD_SETSIZE needs to have been increased
 #endif
 
 #include "postgres_fe.h"
@@ -40,9 +40,7 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/time.h>
-#ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>		/* for getrlimit */
-#endif
 
 /* For testing, PGBENCH_USE_SELECT can be defined to force use of that code */
 #if defined(HAVE_PPOLL) && !defined(PGBENCH_USE_SELECT)
@@ -52,9 +50,7 @@
 #endif
 #else							/* no ppoll(), so use select() */
 #define POLL_USING_SELECT
-#ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
-#endif
 #endif
 
 #include "common/int.h"
@@ -72,6 +68,7 @@
 #include "port/pg_bitutils.h"
 #include "portability/instr_time.h"
 
+/* X/Open (XSI) requires <math.h> to provide M_PI, but core POSIX does not */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -314,7 +311,7 @@ const char *progname;
 
 #define WSEP '@'				/* weight separator */
 
-volatile bool timer_exceeded = false;	/* flag from signal handler */
+volatile sig_atomic_t timer_exceeded = false;	/* flag from signal handler */
 
 /*
  * We don't want to allocate variables one by one; for efficiency, add a
@@ -912,7 +909,7 @@ usage(void)
 		   "                           protocol for submitting queries (default: simple)\n"
 		   "  -n, --no-vacuum          do not run VACUUM before tests\n"
 		   "  -P, --progress=NUM       show thread progress report every NUM seconds\n"
-		   "  -r, --report-per-command report latencies, failures and retries per command\n"
+		   "  -r, --report-per-command report latencies, failures, and retries per command\n"
 		   "  -R, --rate=NUM           target rate in transactions per second\n"
 		   "  -s, --scale=NUM          report this scale factor in output\n"
 		   "  -t, --transactions=NUM   number of transactions each client runs (default: 10)\n"
@@ -1139,8 +1136,8 @@ getGaussianRand(pg_prng_state *state, int64 min, int64 max,
 	Assert(parameter >= MIN_GAUSSIAN_PARAM);
 
 	/*
-	 * Get user specified random number from this loop, with -parameter <
-	 * stdev <= parameter
+	 * Get normally-distributed random number in the range -parameter <= stdev
+	 * < parameter.
 	 *
 	 * This loop is executed until the number is in the expected range.
 	 *
@@ -1152,25 +1149,7 @@ getGaussianRand(pg_prng_state *state, int64 min, int64 max,
 	 */
 	do
 	{
-		/*
-		 * pg_prng_double generates [0, 1), but for the basic version of the
-		 * Box-Muller transform the two uniformly distributed random numbers
-		 * are expected to be in (0, 1] (see
-		 * https://en.wikipedia.org/wiki/Box-Muller_transform)
-		 */
-		double		rand1 = 1.0 - pg_prng_double(state);
-		double		rand2 = 1.0 - pg_prng_double(state);
-
-		/* Box-Muller basic form transform */
-		double		var_sqrt = sqrt(-2.0 * log(rand1));
-
-		stdev = var_sqrt * sin(2.0 * M_PI * rand2);
-
-		/*
-		 * we may try with cos, but there may be a bias induced if the
-		 * previous value fails the test. To be on the safe side, let us try
-		 * over.
-		 */
+		stdev = pg_prng_double_normal(state);
 	}
 	while (stdev < -parameter || stdev >= parameter);
 
@@ -2977,6 +2956,8 @@ runShellCommand(Variables *variables, char *variable, char **argv, int argc)
 
 	command[len] = '\0';
 
+	fflush(NULL);				/* needed before either system() or popen() */
+
 	/* Fast path for non-assignment case */
 	if (variable == NULL)
 	{
@@ -3004,7 +2985,7 @@ runShellCommand(Variables *variables, char *variable, char **argv, int argc)
 	}
 	if (pclose(fp) < 0)
 	{
-		pg_log_error("%s: could not close shell command", argv[0]);
+		pg_log_error("%s: could not run shell command: %m", argv[0]);
 		return false;
 	}
 
@@ -3113,7 +3094,6 @@ sendCommand(CState *st, Command *command)
 			for (j = 0; commands[j] != NULL; j++)
 			{
 				PGresult   *res;
-				char		name[MAX_PREPARE_NAME];
 
 				if (commands[j]->type != SQL_COMMAND)
 					continue;
@@ -3515,10 +3495,9 @@ printVerboseErrorMessages(CState *st, pg_time_usec_t *now, bool is_retry)
 		resetPQExpBuffer(buf);
 
 	printfPQExpBuffer(buf, "client %d ", st->id);
-	appendPQExpBuffer(buf, "%s",
-					  (is_retry ?
-					   "repeats the transaction after the error" :
-					   "ends the failed transaction"));
+	appendPQExpBufferStr(buf, (is_retry ?
+							   "repeats the transaction after the error" :
+							   "ends the failed transaction"));
 	appendPQExpBuffer(buf, " (try %u", st->tries);
 
 	/* Print max_tries if it is not unlimitted. */
@@ -3535,7 +3514,7 @@ printVerboseErrorMessages(CState *st, pg_time_usec_t *now, bool is_retry)
 		appendPQExpBuffer(buf, ", %.3f%% of the maximum time of tries was used",
 						  (100.0 * (*now - st->txn_scheduled) / latency_limit));
 	}
-	appendPQExpBuffer(buf, ")\n");
+	appendPQExpBufferStr(buf, ")\n");
 
 	pg_log_info("%s", buf->data);
 }
@@ -3807,8 +3786,6 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				/* quickly skip commands until something to do... */
 				while (true)
 				{
-					Command    *command;
-
 					command = sql_script[st->use_file].commands[st->command];
 
 					/* cannot reach end of script in that state */
@@ -3963,8 +3940,6 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 */
 				if (report_per_command)
 				{
-					Command    *command;
-
 					pg_time_now_lazy(&now);
 
 					command = sql_script[st->use_file].commands[st->command];
@@ -4423,7 +4398,7 @@ executeMetaCommand(CState *st, pg_time_usec_t *now)
 }
 
 /*
- * Return the number fo failed transactions.
+ * Return the number of failed transactions.
  */
 static int64
 getFailures(const StatsData *stats)
@@ -6623,36 +6598,22 @@ main(int argc, char **argv)
 	if (!set_random_seed(getenv("PGBENCH_RANDOM_SEED")))
 		pg_fatal("error while setting random seed from PGBENCH_RANDOM_SEED environment variable");
 
-	while ((c = getopt_long(argc, argv, "iI:h:nvp:dqb:SNc:j:Crs:t:T:U:lf:D:F:M:P:R:L:", long_options, &optindex)) != -1)
+	while ((c = getopt_long(argc, argv, "b:c:CdD:f:F:h:iI:j:lL:M:nNp:P:qrR:s:St:T:U:v", long_options, &optindex)) != -1)
 	{
 		char	   *script;
 
 		switch (c)
 		{
-			case 'i':
-				is_init_mode = true;
-				break;
-			case 'I':
-				pg_free(initialize_steps);
-				initialize_steps = pg_strdup(optarg);
-				checkInitSteps(initialize_steps);
-				initialization_option_set = true;
-				break;
-			case 'h':
-				pghost = pg_strdup(optarg);
-				break;
-			case 'n':
-				is_no_vacuum = true;
-				break;
-			case 'v':
+			case 'b':
+				if (strcmp(optarg, "list") == 0)
+				{
+					listAvailableScripts();
+					exit(0);
+				}
+				weight = parseScriptWeight(optarg, &script);
+				process_builtin(findBuiltin(script), weight);
 				benchmarking_option_set = true;
-				do_vacuum_accounts = true;
-				break;
-			case 'p':
-				pgport = pg_strdup(optarg);
-				break;
-			case 'd':
-				pg_logging_increase_verbosity();
+				internal_script_used = true;
 				break;
 			case 'c':
 				benchmarking_option_set = true;
@@ -6662,11 +6623,7 @@ main(int argc, char **argv)
 					exit(1);
 				}
 #ifdef HAVE_GETRLIMIT
-#ifdef RLIMIT_NOFILE			/* most platforms use RLIMIT_NOFILE */
 				if (getrlimit(RLIMIT_NOFILE, &rlim) == -1)
-#else							/* but BSD doesn't ... */
-				if (getrlimit(RLIMIT_OFILE, &rlim) == -1)
-#endif							/* RLIMIT_NOFILE */
 					pg_fatal("getrlimit failed: %m");
 				if (rlim.rlim_cur < nclients + 3)
 				{
@@ -6676,6 +6633,50 @@ main(int argc, char **argv)
 					exit(1);
 				}
 #endif							/* HAVE_GETRLIMIT */
+				break;
+			case 'C':
+				benchmarking_option_set = true;
+				is_connect = true;
+				break;
+			case 'd':
+				pg_logging_increase_verbosity();
+				break;
+			case 'D':
+				{
+					char	   *p;
+
+					benchmarking_option_set = true;
+
+					if ((p = strchr(optarg, '=')) == NULL || p == optarg || *(p + 1) == '\0')
+						pg_fatal("invalid variable definition: \"%s\"", optarg);
+
+					*p++ = '\0';
+					if (!putVariable(&state[0].variables, "option", optarg, p))
+						exit(1);
+				}
+				break;
+			case 'f':
+				weight = parseScriptWeight(optarg, &script);
+				process_file(script, weight);
+				benchmarking_option_set = true;
+				break;
+			case 'F':
+				initialization_option_set = true;
+				if (!option_parse_int(optarg, "-F/--fillfactor", 10, 100,
+									  &fillfactor))
+					exit(1);
+				break;
+			case 'h':
+				pghost = pg_strdup(optarg);
+				break;
+			case 'i':
+				is_init_mode = true;
+				break;
+			case 'I':
+				pg_free(initialize_steps);
+				initialize_steps = pg_strdup(optarg);
+				checkInitSteps(initialize_steps);
+				initialization_option_set = true;
 				break;
 			case 'j':			/* jobs */
 				benchmarking_option_set = true;
@@ -6689,19 +6690,76 @@ main(int argc, char **argv)
 					pg_fatal("threads are not supported on this platform; use -j1");
 #endif							/* !ENABLE_THREAD_SAFETY */
 				break;
-			case 'C':
+			case 'l':
 				benchmarking_option_set = true;
-				is_connect = true;
+				use_log = true;
+				break;
+			case 'L':
+				{
+					double		limit_ms = atof(optarg);
+
+					if (limit_ms <= 0.0)
+						pg_fatal("invalid latency limit: \"%s\"", optarg);
+					benchmarking_option_set = true;
+					latency_limit = (int64) (limit_ms * 1000);
+				}
+				break;
+			case 'M':
+				benchmarking_option_set = true;
+				for (querymode = 0; querymode < NUM_QUERYMODE; querymode++)
+					if (strcmp(optarg, QUERYMODE[querymode]) == 0)
+						break;
+				if (querymode >= NUM_QUERYMODE)
+					pg_fatal("invalid query mode (-M): \"%s\"", optarg);
+				break;
+			case 'n':
+				is_no_vacuum = true;
+				break;
+			case 'N':
+				process_builtin(findBuiltin("simple-update"), 1);
+				benchmarking_option_set = true;
+				internal_script_used = true;
+				break;
+			case 'p':
+				pgport = pg_strdup(optarg);
+				break;
+			case 'P':
+				benchmarking_option_set = true;
+				if (!option_parse_int(optarg, "-P/--progress", 1, INT_MAX,
+									  &progress))
+					exit(1);
+				break;
+			case 'q':
+				initialization_option_set = true;
+				use_quiet = true;
 				break;
 			case 'r':
 				benchmarking_option_set = true;
 				report_per_command = true;
+				break;
+			case 'R':
+				{
+					/* get a double from the beginning of option value */
+					double		throttle_value = atof(optarg);
+
+					benchmarking_option_set = true;
+
+					if (throttle_value <= 0.0)
+						pg_fatal("invalid rate limit: \"%s\"", optarg);
+					/* Invert rate limit into per-transaction delay in usec */
+					throttle_delay = 1000000.0 / throttle_value;
+				}
 				break;
 			case 's':
 				scale_given = true;
 				if (!option_parse_int(optarg, "-s/--scale", 1, INT_MAX,
 									  &scale))
 					exit(1);
+				break;
+			case 'S':
+				process_builtin(findBuiltin("select-only"), 1);
+				benchmarking_option_set = true;
+				internal_script_used = true;
 				break;
 			case 't':
 				benchmarking_option_set = true;
@@ -6718,96 +6776,9 @@ main(int argc, char **argv)
 			case 'U':
 				username = pg_strdup(optarg);
 				break;
-			case 'l':
+			case 'v':
 				benchmarking_option_set = true;
-				use_log = true;
-				break;
-			case 'q':
-				initialization_option_set = true;
-				use_quiet = true;
-				break;
-			case 'b':
-				if (strcmp(optarg, "list") == 0)
-				{
-					listAvailableScripts();
-					exit(0);
-				}
-				weight = parseScriptWeight(optarg, &script);
-				process_builtin(findBuiltin(script), weight);
-				benchmarking_option_set = true;
-				internal_script_used = true;
-				break;
-			case 'S':
-				process_builtin(findBuiltin("select-only"), 1);
-				benchmarking_option_set = true;
-				internal_script_used = true;
-				break;
-			case 'N':
-				process_builtin(findBuiltin("simple-update"), 1);
-				benchmarking_option_set = true;
-				internal_script_used = true;
-				break;
-			case 'f':
-				weight = parseScriptWeight(optarg, &script);
-				process_file(script, weight);
-				benchmarking_option_set = true;
-				break;
-			case 'D':
-				{
-					char	   *p;
-
-					benchmarking_option_set = true;
-
-					if ((p = strchr(optarg, '=')) == NULL || p == optarg || *(p + 1) == '\0')
-						pg_fatal("invalid variable definition: \"%s\"", optarg);
-
-					*p++ = '\0';
-					if (!putVariable(&state[0].variables, "option", optarg, p))
-						exit(1);
-				}
-				break;
-			case 'F':
-				initialization_option_set = true;
-				if (!option_parse_int(optarg, "-F/--fillfactor", 10, 100,
-									  &fillfactor))
-					exit(1);
-				break;
-			case 'M':
-				benchmarking_option_set = true;
-				for (querymode = 0; querymode < NUM_QUERYMODE; querymode++)
-					if (strcmp(optarg, QUERYMODE[querymode]) == 0)
-						break;
-				if (querymode >= NUM_QUERYMODE)
-					pg_fatal("invalid query mode (-M): \"%s\"", optarg);
-				break;
-			case 'P':
-				benchmarking_option_set = true;
-				if (!option_parse_int(optarg, "-P/--progress", 1, INT_MAX,
-									  &progress))
-					exit(1);
-				break;
-			case 'R':
-				{
-					/* get a double from the beginning of option value */
-					double		throttle_value = atof(optarg);
-
-					benchmarking_option_set = true;
-
-					if (throttle_value <= 0.0)
-						pg_fatal("invalid rate limit: \"%s\"", optarg);
-					/* Invert rate limit into per-transaction delay in usec */
-					throttle_delay = 1000000.0 / throttle_value;
-				}
-				break;
-			case 'L':
-				{
-					double		limit_ms = atof(optarg);
-
-					if (limit_ms <= 0.0)
-						pg_fatal("invalid latency limit: \"%s\"", optarg);
-					benchmarking_option_set = true;
-					latency_limit = (int64) (limit_ms * 1000);
-				}
+				do_vacuum_accounts = true;
 				break;
 			case 1:				/* unlogged-tables */
 				initialization_option_set = true;
@@ -7518,9 +7489,9 @@ threadRun(void *arg)
 		/* progress report is made by thread 0 for all threads */
 		if (progress && thread->tid == 0)
 		{
-			pg_time_usec_t now = pg_time_now();
+			pg_time_usec_t now2 = pg_time_now();
 
-			if (now >= next_report)
+			if (now2 >= next_report)
 			{
 				/*
 				 * Horrible hack: this relies on the thread pointer we are
@@ -7528,7 +7499,7 @@ threadRun(void *arg)
 				 * entry of the threads array.  That is why this MUST be done
 				 * by thread 0 and not any other.
 				 */
-				printProgressReport(thread, thread_start, now,
+				printProgressReport(thread, thread_start, now2,
 									&last, &last_report);
 
 				/*
@@ -7538,7 +7509,7 @@ threadRun(void *arg)
 				do
 				{
 					next_report += (int64) 1000000 * progress;
-				} while (now >= next_report);
+				} while (now2 >= next_report);
 			}
 		}
 	}

@@ -31,7 +31,7 @@
  * should be killed by SIGQUIT and then a recovery cycle started.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -293,18 +293,7 @@ HandleWalWriterInterrupts(void)
 	}
 
 	if (ShutdownRequestPending)
-	{
-		/*
-		 * Force reporting remaining WAL statistics at process exit.
-		 *
-		 * Since pgstat_report_wal is invoked with 'force' is false in main
-		 * loop to avoid overloading the cumulative stats system, there may
-		 * exist unreported stats counters for the WAL writer.
-		 */
-		pgstat_report_wal(true);
-
 		proc_exit(0);
-	}
 
 	/* Perform logging of memory contexts of this process */
 	if (LogMemoryContextPending)

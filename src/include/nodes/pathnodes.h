@@ -6,7 +6,7 @@
  * We don't support copying RelOptInfo, IndexOptInfo, or Path nodes.
  * There are some subsidiary structs that are useful to copy, though.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/pathnodes.h
@@ -113,6 +113,9 @@ typedef struct PlannerGlobal
 	/* "flat" rangetable for executor */
 	List	   *finalrtable;
 
+	/* "flat" list of RTEPermissionInfos */
+	List	   *finalrteperminfos;
+
 	/* "flat" list of PlanRowMarks */
 	List	   *finalrowmarks;
 
@@ -121,6 +124,9 @@ typedef struct PlannerGlobal
 
 	/* "flat" list of AppendRelInfos */
 	List	   *appendRelations;
+
+	/* List of PartitionPruneInfo contained in the plan */
+	List	   *partPruneInfos;
 
 	/* OIDs of relations the plan depends on */
 	List	   *relationOids;
@@ -328,11 +334,11 @@ struct PlannerInfo
 
 	/*
 	 * all_result_relids is empty for SELECT, otherwise it contains at least
-	 * parse->resultRelation.  For UPDATE/DELETE across an inheritance or
-	 * partitioning tree, the result rel's child relids are added.  When using
-	 * multi-level partitioning, intermediate partitioned rels are included.
-	 * leaf_result_relids is similar except that only actual result tables,
-	 * not partitioned tables, are included in it.
+	 * parse->resultRelation.  For UPDATE/DELETE/MERGE across an inheritance
+	 * or partitioning tree, the result rel's child relids are added.  When
+	 * using multi-level partitioning, intermediate partitioned rels are
+	 * included. leaf_result_relids is similar except that only actual result
+	 * tables, not partitioned tables, are included in it.
 	 */
 	/* set of all result relids */
 	Relids		all_result_relids;
@@ -357,6 +363,11 @@ struct PlannerInfo
 	/* list of PlaceHolderInfos */
 	List	   *placeholder_list;
 
+	/* array of PlaceHolderInfos indexed by phid */
+	struct PlaceHolderInfo **placeholder_array pg_node_attr(read_write_ignore, array_size(placeholder_array_size));
+	/* allocated size of array */
+	int			placeholder_array_size pg_node_attr(read_write_ignore);
+
 	/* list of ForeignKeyOptInfos */
 	List	   *fkey_list;
 
@@ -365,6 +376,14 @@ struct PlannerInfo
 
 	/* groupClause pathkeys, if any */
 	List	   *group_pathkeys;
+
+	/*
+	 * The number of elements in the group_pathkeys list which belong to the
+	 * GROUP BY clause.  Additional ones belong to ORDER BY / DISTINCT
+	 * aggregates.
+	 */
+	int			num_groupby_pathkeys;
+
 	/* pathkeys of bottom window, if any */
 	List	   *window_pathkeys;
 	/* distinctClause pathkeys, if any */
@@ -386,6 +405,34 @@ struct PlannerInfo
 
 	/* Result tlists chosen by grouping_planner for upper-stage processing */
 	struct PathTarget *upper_targets[UPPERREL_FINAL + 1] pg_node_attr(read_write_ignore);
+
+	/*
+	 * The fully-processed groupClause is kept here.  It differs from
+	 * parse->groupClause in that we remove any items that we can prove
+	 * redundant, so that only the columns named here actually need to be
+	 * compared to determine grouping.  Note that it's possible for *all* the
+	 * items to be proven redundant, implying that there is only one group
+	 * containing all the query's rows.  Hence, if you want to check whether
+	 * GROUP BY was specified, test for nonempty parse->groupClause, not for
+	 * nonempty processed_groupClause.
+	 *
+	 * Currently, when grouping sets are specified we do not attempt to
+	 * optimize the groupClause, so that processed_groupClause will be
+	 * identical to parse->groupClause.
+	 */
+	List	   *processed_groupClause;
+
+	/*
+	 * The fully-processed distinctClause is kept here.  It differs from
+	 * parse->distinctClause in that we remove any items that we can prove
+	 * redundant, so that only the columns named here actually need to be
+	 * compared to determine uniqueness.  Note that it's possible for *all*
+	 * the items to be proven redundant, implying that there should be only
+	 * one output row.  Hence, if you want to check whether DISTINCT was
+	 * specified, test for nonempty parse->distinctClause, not for nonempty
+	 * processed_distinctClause.
+	 */
+	List	   *processed_distinctClause;
 
 	/*
 	 * The fully-processed targetlist is kept here.  It differs from
@@ -441,6 +488,8 @@ struct PlannerInfo
 	bool		hasPseudoConstantQuals;
 	/* true if we've made any of those */
 	bool		hasAlternativeSubPlans;
+	/* true once we're no longer allowed to add PlaceHolderInfos */
+	bool		placeholdersFrozen;
 	/* true if planning a recursive WITH item */
 	bool		hasRecursion;
 
@@ -488,6 +537,9 @@ struct PlannerInfo
 
 	/* Does this query modify any partition key columns? */
 	bool		partColsUpdated;
+
+	/* PartitionPruneInfos added in this query's plan. */
+	List	   *partPruneInfos;
 };
 
 
@@ -629,7 +681,7 @@ typedef struct PartitionSchemeData *PartitionScheme;
  *		lateral_referencers - relids of rels that reference this one laterally
  *				(includes both direct and indirect lateral references)
  *		indexlist - list of IndexOptInfo nodes for relation's indexes
- *					(always NIL if it's not a table)
+ *					(always NIL if it's not a table or partitioned table)
  *		pages - number of disk pages in relation (zero if not a table)
  *		tuples - number of tuples in relation (not considering restrictions)
  *		allvisfrac - fraction of disk pages that are marked all-visible
@@ -886,7 +938,7 @@ typedef struct RelOptInfo
 	 */
 	/* identifies server for the table or join */
 	Oid			serverid;
-	/* identifies user to check access as */
+	/* identifies user to check access as; 0 means to check as current user */
 	Oid			userid;
 	/* join is only valid for current user */
 	bool		useridiscurrent;
@@ -896,13 +948,11 @@ typedef struct RelOptInfo
 
 	/*
 	 * cache space for remembering if we have proven this relation unique
-	 *
-	 * can't print unique_for_rels/non_unique_for_rels; BMSes aren't Nodes
 	 */
 	/* known unique for these other relid set(s) */
-	List	   *unique_for_rels pg_node_attr(read_write_ignore);
+	List	   *unique_for_rels;
 	/* known not unique for these set(s) */
-	List	   *non_unique_for_rels pg_node_attr(read_write_ignore);
+	List	   *non_unique_for_rels;
 
 	/*
 	 * used by various scans and joins:
@@ -923,7 +973,15 @@ typedef struct RelOptInfo
 	 */
 	/* consider partitionwise join paths? (if partitioned rel) */
 	bool		consider_partitionwise_join;
-	/* Relids of topmost parents (if "other" rel) */
+
+	/*
+	 * inheritance links, if this is an otherrel (otherwise NULL):
+	 */
+	/* Immediate parent relation (dumping it would be too verbose) */
+	struct RelOptInfo *parent pg_node_attr(read_write_ignore);
+	/* Topmost parent relation (dumping it would be too verbose) */
+	struct RelOptInfo *top_parent pg_node_attr(read_write_ignore);
+	/* Relids of topmost parent (redundant, but handy) */
 	Relids		top_parent_relids;
 
 	/*
@@ -1067,11 +1125,11 @@ struct IndexOptInfo
 	Oid		   *opfamily pg_node_attr(array_size(nkeycolumns));
 	/* OIDs of opclass declared input data types */
 	Oid		   *opcintype pg_node_attr(array_size(nkeycolumns));
-	/* OIDs of btree opfamilies, if orderable */
+	/* OIDs of btree opfamilies, if orderable.  NULL if partitioned index */
 	Oid		   *sortopfamily pg_node_attr(array_size(nkeycolumns));
-	/* is sort order descending? */
+	/* is sort order descending? or NULL if partitioned index */
 	bool	   *reverse_sort pg_node_attr(array_size(nkeycolumns));
-	/* do NULLs come first in the sort order? */
+	/* do NULLs come first in the sort order? or NULL if partitioned index */
 	bool	   *nulls_first pg_node_attr(array_size(nkeycolumns));
 	/* opclass-specific options for columns */
 	bytea	  **opclassoptions pg_node_attr(read_write_ignore);
@@ -1109,7 +1167,7 @@ struct IndexOptInfo
 
 	/*
 	 * Remaining fields are copied from the index AM's API struct
-	 * (IndexAmRoutine).
+	 * (IndexAmRoutine).  These fields are not set for partitioned indexes.
 	 */
 	bool		amcanorderbyop;
 	bool		amoptionalkey;
@@ -1252,7 +1310,9 @@ typedef struct StatisticExtInfo
  *
  * NB: EquivalenceClasses are never copied after creation.  Therefore,
  * copyObject() copies pointers to them as pointers, and equal() compares
- * pointers to EquivalenceClasses via pointer equality.
+ * pointers to EquivalenceClasses via pointer equality.  This is implemented
+ * by putting copy_as_scalar and equal_as_scalar attributes on fields that
+ * are pointers to EquivalenceClasses.  The same goes for EquivalenceMembers.
  */
 typedef struct EquivalenceClass
 {
@@ -1343,23 +1403,12 @@ typedef struct PathKey
 
 	NodeTag		type;
 
-	EquivalenceClass *pk_eclass;	/* the value that is ordered */
+	/* the value that is ordered */
+	EquivalenceClass *pk_eclass pg_node_attr(copy_as_scalar, equal_as_scalar);
 	Oid			pk_opfamily;	/* btree opfamily defining the ordering */
 	int			pk_strategy;	/* sort direction (ASC or DESC) */
 	bool		pk_nulls_first; /* do NULLs come before normal values? */
 } PathKey;
-
-/*
- * Combines information about pathkeys and the associated clauses.
- */
-typedef struct PathKeyInfo
-{
-	pg_node_attr(no_read)
-
-	NodeTag		type;
-	List	   *pathkeys;
-	List	   *clauses;
-} PathKeyInfo;
 
 /*
  * VolatileFunctionStatus -- allows nodes to cache their
@@ -1847,8 +1896,8 @@ typedef struct MemoizePath
 {
 	Path		path;
 	Path	   *subpath;		/* outerpath to cache tuples from */
-	List	   *hash_operators; /* hash operators for each key */
-	List	   *param_exprs;	/* cache keys */
+	List	   *hash_operators; /* OIDs of hash equality ops for cache keys */
+	List	   *param_exprs;	/* expressions that are cache keys */
 	bool		singlerow;		/* true if the cache entry is to be marked as
 								 * complete after caching the first record. */
 	bool		binary_mode;	/* true when cache key should be compared bit
@@ -2463,7 +2512,7 @@ typedef struct RestrictInfo
 	 * Generating EquivalenceClass.  This field is NULL unless clause is
 	 * potentially redundant.
 	 */
-	EquivalenceClass *parent_ec pg_node_attr(equal_ignore, read_write_ignore);
+	EquivalenceClass *parent_ec pg_node_attr(copy_as_scalar, equal_ignore, read_write_ignore);
 
 	/*
 	 * cache space for cost and selectivity
@@ -2491,13 +2540,13 @@ typedef struct RestrictInfo
 	 */
 
 	/* EquivalenceClass containing lefthand */
-	EquivalenceClass *left_ec pg_node_attr(equal_ignore, read_write_ignore);
+	EquivalenceClass *left_ec pg_node_attr(copy_as_scalar, equal_ignore, read_write_ignore);
 	/* EquivalenceClass containing righthand */
-	EquivalenceClass *right_ec pg_node_attr(equal_ignore, read_write_ignore);
+	EquivalenceClass *right_ec pg_node_attr(copy_as_scalar, equal_ignore, read_write_ignore);
 	/* EquivalenceMember for lefthand */
-	EquivalenceMember *left_em pg_node_attr(equal_ignore);
+	EquivalenceMember *left_em pg_node_attr(copy_as_scalar, equal_ignore);
 	/* EquivalenceMember for righthand */
-	EquivalenceMember *right_em pg_node_attr(equal_ignore);
+	EquivalenceMember *right_em pg_node_attr(copy_as_scalar, equal_ignore);
 
 	/*
 	 * List of MergeScanSelCache structs.  Those aren't Nodes, so hard to
@@ -2781,10 +2830,10 @@ typedef struct AppendRelInfo
 } AppendRelInfo;
 
 /*
- * Information about a row-identity "resjunk" column in UPDATE/DELETE.
+ * Information about a row-identity "resjunk" column in UPDATE/DELETE/MERGE.
  *
- * In partitioned UPDATE/DELETE it's important for child partitions to share
- * row-identity columns whenever possible, so as not to chew up too many
+ * In partitioned UPDATE/DELETE/MERGE it's important for child partitions to
+ * share row-identity columns whenever possible, so as not to chew up too many
  * targetlist columns.  We use these structs to track which identity columns
  * have been requested.  In the finished plan, each of these will give rise
  * to one resjunk entry in the targetlist of the ModifyTable's subplan node.
@@ -3134,12 +3183,12 @@ typedef struct AggInfo
 	NodeTag		type;
 
 	/*
-	 * Link to an Aggref expr this state value is for.
+	 * List of Aggref exprs that this state value is for.
 	 *
-	 * There can be multiple identical Aggref's sharing the same per-agg. This
-	 * points to the first one of them.
+	 * There will always be at least one, but there can be multiple identical
+	 * Aggref's sharing the same per-agg.
 	 */
-	Aggref	   *representative_aggref;
+	List	   *aggrefs;
 
 	/* Transition state number for this aggregate */
 	int			transno;

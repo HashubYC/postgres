@@ -11,7 +11,7 @@
  * bms_is_empty() in preference to testing for NULL.)
  *
  *
- * Copyright (c) 2003-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2003-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/nodes/bitmapset.c
@@ -194,6 +194,7 @@ bms_make_singleton(int x)
 	wordnum = WORDNUM(x);
 	bitnum = BITNUM(x);
 	result = (Bitmapset *) palloc0(BITMAPSET_SIZE(wordnum + 1));
+	result->type = T_Bitmapset;
 	result->nwords = wordnum + 1;
 	result->words[wordnum] = ((bitmapword) 1 << bitnum);
 	return result;
@@ -852,6 +853,7 @@ bms_add_range(Bitmapset *a, int lower, int upper)
 	if (a == NULL)
 	{
 		a = (Bitmapset *) palloc0(BITMAPSET_SIZE(uwordnum + 1));
+		a->type = T_Bitmapset;
 		a->nwords = uwordnum + 1;
 	}
 	else if (uwordnum >= a->nwords)

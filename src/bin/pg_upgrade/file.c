@@ -3,7 +3,7 @@
  *
  *	file system operations
  *
- *	Copyright (c) 2010-2022, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/file.c
  */
 
@@ -57,9 +57,12 @@ cloneFile(const char *src, const char *dst,
 
 	if (ioctl(dest_fd, FICLONE, src_fd) < 0)
 	{
+		int			save_errno = errno;
+
 		unlink(dst);
+
 		pg_fatal("error while cloning relation \"%s.%s\" (\"%s\" to \"%s\"): %s",
-				 schemaName, relName, src, dst, strerror(errno));
+				 schemaName, relName, src, dst, strerror(save_errno));
 	}
 
 	close(src_fd);

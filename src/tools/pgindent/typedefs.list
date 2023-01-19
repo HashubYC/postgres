@@ -56,7 +56,7 @@ AggregateInstrumentation
 AlenState
 Alias
 AllocBlock
-AllocChunk
+AllocFreeListLink
 AllocPointer
 AllocSet
 AllocSetContext
@@ -233,6 +233,7 @@ BackgroundWorker
 BackgroundWorkerArray
 BackgroundWorkerHandle
 BackgroundWorkerSlot
+BackupState
 Barrier
 BaseBackupCmd
 BaseBackupTargetHandle
@@ -373,6 +374,7 @@ CkptTsStatus
 ClientAuthentication_hook_type
 ClientCertMode
 ClientCertName
+ClientConnectionInfo
 ClientData
 ClonePtrType
 ClosePortalStmt
@@ -426,7 +428,6 @@ CompiledExprState
 CompositeIOData
 CompositeTypeStmt
 CompoundAffixFlag
-CompressionAlgorithm
 CompressionLocation
 CompressorState
 ComputeXidHorizonsResult
@@ -642,6 +643,7 @@ EquivalenceClass
 EquivalenceMember
 ErrorContextCallback
 ErrorData
+ErrorSaveContext
 EstimateDSMForeignScan_function
 EstimationInfo
 EventTriggerCacheEntry
@@ -946,7 +948,6 @@ GatherState
 Gene
 GeneratePruningStepsContext
 GenerationBlock
-GenerationChunk
 GenerationContext
 GenerationPointer
 GenericCosts
@@ -1237,12 +1238,10 @@ JsonBehaviorType
 JsonCoercion
 JsonCommon
 JsonConstructorExpr
-JsonConstructorExprState
 JsonConstructorType
 JsonEncoding
 JsonExpr
 JsonExprOp
-JsonExprState
 JsonFormat
 JsonFormatType
 JsonFunc
@@ -1291,18 +1290,6 @@ JsonQuotes
 JsonReturning
 JsonScalarExpr
 JsonSemAction
-JsonSerializeExpr
-JsonTable
-JsonTableColumn
-JsonTableColumnType
-JsonTableContext
-JsonTableJoinState
-JsonTableParent
-JsonTablePlan
-JsonTablePlanJoinType
-JsonTablePlanType
-JsonTableScanState
-JsonTableSibling
 JsonTokenType
 JsonTransformStringValuesAction
 JsonTypeCategory
@@ -1469,6 +1456,7 @@ LogicalDecodeStreamStopCB
 LogicalDecodeStreamTruncateCB
 LogicalDecodeTruncateCB
 LogicalDecodingContext
+LogicalDecodingMode
 LogicalErrorCallbackState
 LogicalOutputPluginInit
 LogicalOutputPluginWriterPrepareWrite
@@ -1485,6 +1473,7 @@ LogicalRepRelId
 LogicalRepRelMapEntry
 LogicalRepRelation
 LogicalRepRollbackPreparedTxnData
+LogicalRepStreamAbortData
 LogicalRepTupleData
 LogicalRepTyp
 LogicalRepWorker
@@ -1521,11 +1510,13 @@ MemoizeKey
 MemoizePath
 MemoizeState
 MemoizeTuple
+MemoryChunk
 MemoryContext
 MemoryContextCallback
 MemoryContextCallbackFunction
 MemoryContextCounters
 MemoryContextData
+MemoryContextMethodID
 MemoryContextMethods
 MemoryStatsPrintFunc
 MergeAction
@@ -1855,7 +1846,6 @@ PROCESS_INFORMATION
 PROCLOCK
 PROCLOCKTAG
 PROC_HDR
-PROC_QUEUE
 PSID
 PSID_AND_ATTRIBUTES
 PSQL_COMP_CASE
@@ -1886,6 +1876,9 @@ PageXLogRecPtr
 PagetableEntry
 Pairs
 ParallelAppendState
+ParallelApplyWorkerEntry
+ParallelApplyWorkerInfo
+ParallelApplyWorkerShared
 ParallelBitmapHeapState
 ParallelBlockTableScanDesc
 ParallelBlockTableScanWorker
@@ -1905,6 +1898,7 @@ ParallelSlotResultHandler
 ParallelState
 ParallelTableScanDesc
 ParallelTableScanDescData
+ParallelTransState
 ParallelVacuumState
 ParallelWorkerContext
 ParallelWorkerInfo
@@ -1934,6 +1928,7 @@ ParserState
 PartClauseInfo
 PartClauseMatchStatus
 PartClauseTarget
+PartialFileSetState
 PartitionBoundInfo
 PartitionBoundInfoData
 PartitionBoundSpec
@@ -2199,6 +2194,7 @@ RI_ConstraintInfo
 RI_QueryHashEntry
 RI_QueryKey
 RTEKind
+RTEPermissionInfo
 RWConflict
 RWConflictPoolHeader
 Range
@@ -2408,8 +2404,6 @@ SQLFunctionCache
 SQLFunctionCachePtr
 SQLFunctionParseInfo
 SQLFunctionParseInfoPtr
-SQLValueFunction
-SQLValueFunctionOp
 SSL
 SSLExtensionInfoContext
 SSL_CTX
@@ -2455,6 +2449,7 @@ SerCommitSeqNo
 SerialControl
 SerializableXactHandle
 SerializedActiveRelMaps
+SerializedClientConnectionInfo
 SerializedRanges
 SerializedReindexState
 SerializedSnapshotData
@@ -2528,7 +2523,6 @@ SingleBoundSortItem
 Size
 SkipPages
 SlabBlock
-SlabChunk
 SlabContext
 SlabSlot
 SlotNumber
@@ -2722,7 +2716,6 @@ TableFunc
 TableFuncRoutine
 TableFuncScan
 TableFuncScanState
-TableFuncType
 TableInfo
 TableLikeClause
 TableSampleClause
@@ -2786,6 +2779,7 @@ TocEntry
 TokenAuxData
 TokenizedAuthLine
 TrackItem
+TransApplyAction
 TransInvalidationInfo
 TransState
 TransactionId
@@ -2833,8 +2827,14 @@ TupleHashTable
 TupleQueueReader
 TupleTableSlot
 TupleTableSlotOps
+TuplesortClusterArg
+TuplesortDatumArg
+TuplesortIndexArg
+TuplesortIndexBTreeArg
+TuplesortIndexHashArg
 TuplesortInstrumentation
 TuplesortMethod
+TuplesortPublic
 TuplesortSpaceType
 Tuplesortstate
 Tuplestorestate
@@ -2933,6 +2933,7 @@ WALInsertLock
 WALInsertLockPadded
 WALOpenSegment
 WALReadError
+WalRcvWakeupReason
 WALSegmentCloseCB
 WALSegmentContext
 WALSegmentOpenCB
@@ -3183,6 +3184,7 @@ compare_context
 config_var_value
 contain_aggs_of_level_context
 convert_testexpr_context
+copy_data_dest_cb
 copy_data_source_cb
 core_YYSTYPE
 core_yy_extra_type
@@ -3199,6 +3201,7 @@ datapagemap_t
 dateKEY
 datetkn
 dce_uuid_t
+dclist_head
 decimal
 deparse_columns
 deparse_context
@@ -3270,6 +3273,7 @@ fix_scan_expr_context
 fix_upper_expr_context
 fix_windowagg_cond_context
 flatten_join_alias_vars_context
+flatten_rtes_walker_context
 float4
 float4KEY
 float8
@@ -3519,7 +3523,6 @@ pg_wc_probefunc
 pg_wchar
 pg_wchar_tbl
 pgp_armor_headers_state
-pgpid_t
 pgsocket
 pgsql_thing_t
 pgssEntry
@@ -3569,6 +3572,7 @@ printTextFormat
 printTextLineFormat
 printTextLineWrap
 printTextRule
+printXheaderWidthType
 printfunc
 priv_map
 process_file_callback_t
@@ -3726,6 +3730,7 @@ timeout_params
 timerCA
 tlist_vinfo
 toast_compress_header
+tokenize_error_callback_arg
 transferMode
 transfer_thread_arg
 trgm

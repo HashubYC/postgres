@@ -11,7 +11,7 @@
  * Transactions on Mathematical Software, Vol. 24, No. 4, December 1998,
  * pages 359-367.
  *
- * Copyright (c) 1998-2022, PostgreSQL Global Development Group
+ * Copyright (c) 1998-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/adt/numeric.c
@@ -497,9 +497,10 @@ static void alloc_var(NumericVar *var, int ndigits);
 static void free_var(NumericVar *var);
 static void zero_var(NumericVar *var);
 
-static const char *set_var_from_str(const char *str, const char *cp,
-									NumericVar *dest);
-static void set_var_from_num(Numeric value, NumericVar *dest);
+static bool set_var_from_str(const char *str, const char *cp,
+							 NumericVar *dest, const char **endptr,
+							 Node *escontext);
+static void set_var_from_num(Numeric num, NumericVar *dest);
 static void init_var_from_num(Numeric num, NumericVar *dest);
 static void set_var_from_var(const NumericVar *value, NumericVar *dest);
 static char *get_str_from_var(const NumericVar *var);
@@ -510,10 +511,10 @@ static void numericvar_deserialize(StringInfo buf, NumericVar *var);
 
 static Numeric duplicate_numeric(Numeric num);
 static Numeric make_result(const NumericVar *var);
-static Numeric make_result_opt_error(const NumericVar *var, bool *error);
+static Numeric make_result_opt_error(const NumericVar *var, bool *have_error);
 
-static void apply_typmod(NumericVar *var, int32 typmod);
-static void apply_typmod_special(Numeric num, int32 typmod);
+static bool apply_typmod(NumericVar *var, int32 typmod, Node *escontext);
+static bool apply_typmod_special(Numeric num, int32 typmod, Node *escontext);
 
 static bool numericvar_to_int32(const NumericVar *var, int32 *result);
 static bool numericvar_to_int64(const NumericVar *var, int64 *result);
@@ -571,8 +572,8 @@ static void log_var(const NumericVar *base, const NumericVar *num,
 					NumericVar *result);
 static void power_var(const NumericVar *base, const NumericVar *exp,
 					  NumericVar *result);
-static void power_var_int(const NumericVar *base, int exp, NumericVar *result,
-						  int rscale);
+static void power_var_int(const NumericVar *base, int exp, int exp_dscale,
+						  NumericVar *result);
 static void power_ten_int(int exp, NumericVar *result);
 
 static int	cmp_abs(const NumericVar *var1, const NumericVar *var2);
@@ -591,7 +592,7 @@ static void compute_bucket(Numeric operand, Numeric bound1, Numeric bound2,
 						   const NumericVar *count_var, bool reversed_bounds,
 						   NumericVar *result_var);
 
-static void accum_sum_add(NumericSumAccum *accum, const NumericVar *var1);
+static void accum_sum_add(NumericSumAccum *accum, const NumericVar *val);
 static void accum_sum_rescale(NumericSumAccum *accum, const NumericVar *val);
 static void accum_sum_carry(NumericSumAccum *accum);
 static void accum_sum_reset(NumericSumAccum *accum);
@@ -617,11 +618,11 @@ Datum
 numeric_in(PG_FUNCTION_ARGS)
 {
 	char	   *str = PG_GETARG_CSTRING(0);
-
 #ifdef NOT_USED
 	Oid			typelem = PG_GETARG_OID(1);
 #endif
 	int32		typmod = PG_GETARG_INT32(2);
+	Node	   *escontext = fcinfo->context;
 	Numeric		res;
 	const char *cp;
 
@@ -679,10 +680,12 @@ numeric_in(PG_FUNCTION_ARGS)
 		 * Use set_var_from_str() to parse a normal numeric value
 		 */
 		NumericVar	value;
+		bool		have_error;
 
 		init_var(&value);
 
-		cp = set_var_from_str(str, cp, &value);
+		if (!set_var_from_str(str, cp, &value, &cp, escontext))
+			PG_RETURN_NULL();
 
 		/*
 		 * We duplicate a few lines of code here because we would like to
@@ -693,16 +696,23 @@ numeric_in(PG_FUNCTION_ARGS)
 		while (*cp)
 		{
 			if (!isspace((unsigned char) *cp))
-				ereport(ERROR,
+				ereturn(escontext, (Datum) 0,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 						 errmsg("invalid input syntax for type %s: \"%s\"",
 								"numeric", str)));
 			cp++;
 		}
 
-		apply_typmod(&value, typmod);
+		if (!apply_typmod(&value, typmod, escontext))
+			PG_RETURN_NULL();
 
-		res = make_result(&value);
+		res = make_result_opt_error(&value, &have_error);
+
+		if (have_error)
+			ereturn(escontext, (Datum) 0,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("value overflows numeric format")));
+
 		free_var(&value);
 
 		PG_RETURN_NUMERIC(res);
@@ -712,7 +722,7 @@ numeric_in(PG_FUNCTION_ARGS)
 	while (*cp)
 	{
 		if (!isspace((unsigned char) *cp))
-			ereport(ERROR,
+			ereturn(escontext, (Datum) 0,
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 					 errmsg("invalid input syntax for type %s: \"%s\"",
 							"numeric", str)));
@@ -720,7 +730,8 @@ numeric_in(PG_FUNCTION_ARGS)
 	}
 
 	/* As above, throw any typmod error after finishing syntax check */
-	apply_typmod_special(res, typmod);
+	if (!apply_typmod_special(res, typmod, escontext))
+		PG_RETURN_NULL();
 
 	PG_RETURN_NUMERIC(res);
 }
@@ -1058,7 +1069,7 @@ numeric_recv(PG_FUNCTION_ARGS)
 	{
 		trunc_var(&value, value.dscale);
 
-		apply_typmod(&value, typmod);
+		(void) apply_typmod(&value, typmod, NULL);
 
 		res = make_result(&value);
 	}
@@ -1067,7 +1078,7 @@ numeric_recv(PG_FUNCTION_ARGS)
 		/* apply_typmod_special wants us to make the Numeric first */
 		res = make_result(&value);
 
-		apply_typmod_special(res, typmod);
+		(void) apply_typmod_special(res, typmod, NULL);
 	}
 
 	free_var(&value);
@@ -1180,7 +1191,7 @@ numeric		(PG_FUNCTION_ARGS)
 	 */
 	if (NUMERIC_IS_SPECIAL(num))
 	{
-		apply_typmod_special(num, typmod);
+		(void) apply_typmod_special(num, typmod, NULL);
 		PG_RETURN_NUMERIC(duplicate_numeric(num));
 	}
 
@@ -1231,7 +1242,7 @@ numeric		(PG_FUNCTION_ARGS)
 	init_var(&var);
 
 	set_var_from_num(num, &var);
-	apply_typmod(&var, typmod);
+	(void) apply_typmod(&var, typmod, NULL);
 	new = make_result(&var);
 
 	free_var(&var);
@@ -4176,7 +4187,8 @@ int64_div_fast_to_numeric(int64 val1, int log10val2)
 	{
 		static int	pow10[] = {1, 10, 100, 1000};
 
-		StaticAssertStmt(lengthof(pow10) == DEC_DIGITS, "mismatch with DEC_DIGITS");
+		StaticAssertDecl(lengthof(pow10) == DEC_DIGITS, "mismatch with DEC_DIGITS");
+
 		if (unlikely(pg_mul_s64_overflow(val1, pow10[DEC_DIGITS - m], &val1)))
 		{
 			/*
@@ -4395,6 +4407,7 @@ float8_numeric(PG_FUNCTION_ARGS)
 	Numeric		res;
 	NumericVar	result;
 	char		buf[DBL_DIG + 100];
+	const char *endptr;
 
 	if (isnan(val))
 		PG_RETURN_NUMERIC(make_result(&const_nan));
@@ -4412,7 +4425,7 @@ float8_numeric(PG_FUNCTION_ARGS)
 	init_var(&result);
 
 	/* Assume we need not worry about leading/trailing spaces */
-	(void) set_var_from_str(buf, buf, &result);
+	(void) set_var_from_str(buf, buf, &result, &endptr, NULL);
 
 	res = make_result(&result);
 
@@ -4488,6 +4501,7 @@ float4_numeric(PG_FUNCTION_ARGS)
 	Numeric		res;
 	NumericVar	result;
 	char		buf[FLT_DIG + 100];
+	const char *endptr;
 
 	if (isnan(val))
 		PG_RETURN_NUMERIC(make_result(&const_nan));
@@ -4505,7 +4519,7 @@ float4_numeric(PG_FUNCTION_ARGS)
 	init_var(&result);
 
 	/* Assume we need not worry about leading/trailing spaces */
-	(void) set_var_from_str(buf, buf, &result);
+	(void) set_var_from_str(buf, buf, &result, &endptr, NULL);
 
 	res = make_result(&result);
 
@@ -6804,14 +6818,19 @@ zero_var(NumericVar *var)
  *	Parse a string and put the number into a variable
  *
  * This function does not handle leading or trailing spaces.  It returns
- * the end+1 position parsed, so that caller can check for trailing
- * spaces/garbage if deemed necessary.
+ * the end+1 position parsed into *endptr, so that caller can check for
+ * trailing spaces/garbage if deemed necessary.
  *
  * cp is the place to actually start parsing; str is what to use in error
  * reports.  (Typically cp would be the same except advanced over spaces.)
+ *
+ * Returns true on success, false on failure (if escontext points to an
+ * ErrorSaveContext; otherwise errors are thrown).
  */
-static const char *
-set_var_from_str(const char *str, const char *cp, NumericVar *dest)
+static bool
+set_var_from_str(const char *str, const char *cp,
+				 NumericVar *dest, const char **endptr,
+				 Node *escontext)
 {
 	bool		have_dp = false;
 	int			i;
@@ -6849,7 +6868,7 @@ set_var_from_str(const char *str, const char *cp, NumericVar *dest)
 	}
 
 	if (!isdigit((unsigned char) *cp))
-		ereport(ERROR,
+		ereturn(escontext, false,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 				 errmsg("invalid input syntax for type %s: \"%s\"",
 						"numeric", str)));
@@ -6873,7 +6892,7 @@ set_var_from_str(const char *str, const char *cp, NumericVar *dest)
 		else if (*cp == '.')
 		{
 			if (have_dp)
-				ereport(ERROR,
+				ereturn(escontext, false,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 						 errmsg("invalid input syntax for type %s: \"%s\"",
 								"numeric", str)));
@@ -6897,7 +6916,7 @@ set_var_from_str(const char *str, const char *cp, NumericVar *dest)
 		cp++;
 		exponent = strtol(cp, &endptr, 10);
 		if (endptr == cp)
-			ereport(ERROR,
+			ereturn(escontext, false,
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 					 errmsg("invalid input syntax for type %s: \"%s\"",
 							"numeric", str)));
@@ -6912,7 +6931,7 @@ set_var_from_str(const char *str, const char *cp, NumericVar *dest)
 		 * for consistency use the same ereport errcode/text as make_result().
 		 */
 		if (exponent >= INT_MAX / 2 || exponent <= -(INT_MAX / 2))
-			ereport(ERROR,
+			ereturn(escontext, false,
 					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 					 errmsg("value overflows numeric format")));
 		dweight += (int) exponent;
@@ -6963,7 +6982,9 @@ set_var_from_str(const char *str, const char *cp, NumericVar *dest)
 	strip_var(dest);
 
 	/* Return end+1 position for caller */
-	return cp;
+	*endptr = cp;
+
+	return true;
 }
 
 
@@ -7455,9 +7476,12 @@ make_result(const NumericVar *var)
  *
  *	Do bounds checking and rounding according to the specified typmod.
  *	Note that this is only applied to normal finite values.
+ *
+ * Returns true on success, false on failure (if escontext points to an
+ * ErrorSaveContext; otherwise errors are thrown).
  */
-static void
-apply_typmod(NumericVar *var, int32 typmod)
+static bool
+apply_typmod(NumericVar *var, int32 typmod, Node *escontext)
 {
 	int			precision;
 	int			scale;
@@ -7467,7 +7491,7 @@ apply_typmod(NumericVar *var, int32 typmod)
 
 	/* Do nothing if we have an invalid typmod */
 	if (!is_valid_numeric_typmod(typmod))
-		return;
+		return true;
 
 	precision = numeric_typmod_precision(typmod);
 	scale = numeric_typmod_scale(typmod);
@@ -7514,7 +7538,7 @@ apply_typmod(NumericVar *var, int32 typmod)
 #error unsupported NBASE
 #endif
 				if (ddigits > maxdigits)
-					ereport(ERROR,
+					ereturn(escontext, false,
 							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 							 errmsg("numeric field overflow"),
 							 errdetail("A field with precision %d, scale %d must round to an absolute value less than %s%d.",
@@ -7528,6 +7552,8 @@ apply_typmod(NumericVar *var, int32 typmod)
 			ddigits -= DEC_DIGITS;
 		}
 	}
+
+	return true;
 }
 
 /*
@@ -7535,9 +7561,12 @@ apply_typmod(NumericVar *var, int32 typmod)
  *
  *	Do bounds checking according to the specified typmod, for an Inf or NaN.
  *	For convenience of most callers, the value is presented in packed form.
+ *
+ * Returns true on success, false on failure (if escontext points to an
+ * ErrorSaveContext; otherwise errors are thrown).
  */
-static void
-apply_typmod_special(Numeric num, int32 typmod)
+static bool
+apply_typmod_special(Numeric num, int32 typmod, Node *escontext)
 {
 	int			precision;
 	int			scale;
@@ -7551,16 +7580,16 @@ apply_typmod_special(Numeric num, int32 typmod)
 	 * any finite number of digits.
 	 */
 	if (NUMERIC_IS_NAN(num))
-		return;
+		return true;
 
 	/* Do nothing if we have a default typmod (-1) */
 	if (!is_valid_numeric_typmod(typmod))
-		return;
+		return true;
 
 	precision = numeric_typmod_precision(typmod);
 	scale = numeric_typmod_scale(typmod);
 
-	ereport(ERROR,
+	ereturn(escontext, false,
 			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 			 errmsg("numeric field overflow"),
 			 errdetail("A field with precision %d, scale %d cannot hold an infinite value.",
@@ -8870,7 +8899,7 @@ div_var_fast(const NumericVar *var1, const NumericVar *var2,
 		if (qdigit != 0)
 		{
 			/* Do we need to normalize now? */
-			maxdiv += Abs(qdigit);
+			maxdiv += abs(qdigit);
 			if (maxdiv > (INT_MAX - INT_MAX / NBASE - 1) / (NBASE - 1))
 			{
 				/*
@@ -8923,7 +8952,7 @@ div_var_fast(const NumericVar *var1, const NumericVar *var2,
 				fquotient = fdividend * fdivisorinverse;
 				qdigit = (fquotient >= 0.0) ? ((int) fquotient) :
 					(((int) fquotient) - 1);	/* truncate towards -infinity */
-				maxdiv += Abs(qdigit);
+				maxdiv += abs(qdigit);
 			}
 
 			/*
@@ -9107,7 +9136,7 @@ div_var_int(const NumericVar *var, int ival, int ival_weight,
 	 * become as large as divisor * NBASE - 1, and so it requires a 64-bit
 	 * integer if this exceeds UINT_MAX.
 	 */
-	divisor = Abs(ival);
+	divisor = abs(ival);
 
 	if (divisor <= UINT_MAX / NBASE)
 	{
@@ -9948,7 +9977,7 @@ exp_var(const NumericVar *arg, NumericVar *result, int rscale)
 
 	/* Guard against overflow/underflow */
 	/* If you change this limit, see also power_var()'s limit */
-	if (Abs(val) >= NUMERIC_MAX_RESULT_SCALE * 3)
+	if (fabs(val) >= NUMERIC_MAX_RESULT_SCALE * 3)
 	{
 		if (val > 0)
 			ereport(ERROR,
@@ -9966,15 +9995,15 @@ exp_var(const NumericVar *arg, NumericVar *result, int rscale)
 	 * Reduce x to the range -0.01 <= x <= 0.01 (approximately) by dividing by
 	 * 2^ndiv2, to improve the convergence rate of the Taylor series.
 	 *
-	 * Note that the overflow check above ensures that Abs(x) < 6000, which
+	 * Note that the overflow check above ensures that fabs(x) < 6000, which
 	 * means that ndiv2 <= 20 here.
 	 */
-	if (Abs(val) > 0.01)
+	if (fabs(val) > 0.01)
 	{
 		ndiv2 = 1;
 		val /= 2;
 
-		while (Abs(val) > 0.01)
+		while (fabs(val) > 0.01)
 		{
 			ndiv2++;
 			val /= 2;
@@ -10116,7 +10145,7 @@ estimate_ln_dweight(const NumericVar *var)
 			 *----------
 			 */
 			ln_var = log((double) digits) + dweight * 2.302585092994046;
-			ln_dweight = (int) log10(Abs(ln_var));
+			ln_dweight = (int) log10(fabs(ln_var));
 		}
 		else
 		{
@@ -10335,13 +10364,8 @@ power_var(const NumericVar *base, const NumericVar *exp, NumericVar *result)
 		{
 			if (expval64 >= PG_INT32_MIN && expval64 <= PG_INT32_MAX)
 			{
-				/* Okay, select rscale */
-				rscale = NUMERIC_MIN_SIG_DIGITS;
-				rscale = Max(rscale, base->dscale);
-				rscale = Max(rscale, NUMERIC_MIN_DISPLAY_SCALE);
-				rscale = Min(rscale, NUMERIC_MAX_DISPLAY_SCALE);
-
-				power_var_int(base, (int) expval64, result, rscale);
+				/* Okay, use power_var_int */
+				power_var_int(base, (int) expval64, exp->dscale, result);
 				return;
 			}
 		}
@@ -10427,7 +10451,7 @@ power_var(const NumericVar *base, const NumericVar *exp, NumericVar *result)
 	val = numericvar_to_double_no_overflow(&ln_num);
 
 	/* initial overflow/underflow test with fuzz factor */
-	if (Abs(val) > NUMERIC_MAX_RESULT_SCALE * 3.01)
+	if (fabs(val) > NUMERIC_MAX_RESULT_SCALE * 3.01)
 	{
 		if (val > 0)
 			ereport(ERROR,
@@ -10475,18 +10499,75 @@ power_var(const NumericVar *base, const NumericVar *exp, NumericVar *result)
  * power_var_int() -
  *
  *	Raise base to the power of exp, where exp is an integer.
+ *
+ *	Note: this routine chooses dscale of the result.
  */
 static void
-power_var_int(const NumericVar *base, int exp, NumericVar *result, int rscale)
+power_var_int(const NumericVar *base, int exp, int exp_dscale,
+			  NumericVar *result)
 {
 	double		f;
 	int			p;
 	int			i;
+	int			rscale;
 	int			sig_digits;
 	unsigned int mask;
 	bool		neg;
 	NumericVar	base_prod;
 	int			local_rscale;
+
+	/*
+	 * Choose the result scale.  For this we need an estimate of the decimal
+	 * weight of the result, which we obtain by approximating using double
+	 * precision arithmetic.
+	 *
+	 * We also perform crude overflow/underflow tests here so that we can exit
+	 * early if the result is sure to overflow/underflow, and to guard against
+	 * integer overflow when choosing the result scale.
+	 */
+	if (base->ndigits != 0)
+	{
+		/*----------
+		 * Choose f (double) and p (int) such that base ~= f * 10^p.
+		 * Then log10(result) = log10(base^exp) ~= exp * (log10(f) + p).
+		 *----------
+		 */
+		f = base->digits[0];
+		p = base->weight * DEC_DIGITS;
+
+		for (i = 1; i < base->ndigits && i * DEC_DIGITS < 16; i++)
+		{
+			f = f * NBASE + base->digits[i];
+			p -= DEC_DIGITS;
+		}
+
+		f = exp * (log10(f) + p);	/* approximate decimal result weight */
+	}
+	else
+		f = 0;					/* result is 0 or 1 (weight 0), or error */
+
+	/* overflow/underflow tests with fuzz factors */
+	if (f > (SHRT_MAX + 1) * DEC_DIGITS)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("value overflows numeric format")));
+	if (f + 1 < -NUMERIC_MAX_DISPLAY_SCALE)
+	{
+		zero_var(result);
+		result->dscale = NUMERIC_MAX_DISPLAY_SCALE;
+		return;
+	}
+
+	/*
+	 * Choose the result scale in the same way as power_var(), so it has at
+	 * least NUMERIC_MIN_SIG_DIGITS significant digits and is not less than
+	 * either input's display scale.
+	 */
+	rscale = NUMERIC_MIN_SIG_DIGITS - (int) f;
+	rscale = Max(rscale, base->dscale);
+	rscale = Max(rscale, exp_dscale);
+	rscale = Max(rscale, NUMERIC_MIN_DISPLAY_SCALE);
+	rscale = Min(rscale, NUMERIC_MAX_DISPLAY_SCALE);
 
 	/* Handle some common special cases, as well as corner cases */
 	switch (exp)
@@ -10532,43 +10613,15 @@ power_var_int(const NumericVar *base, int exp, NumericVar *result, int rscale)
 	 * The general case repeatedly multiplies base according to the bit
 	 * pattern of exp.
 	 *
-	 * First we need to estimate the weight of the result so that we know how
-	 * many significant digits are needed.
+	 * The local rscale used for each multiplication is varied to keep a fixed
+	 * number of significant digits, sufficient to give the required result
+	 * scale.
 	 */
-	f = base->digits[0];
-	p = base->weight * DEC_DIGITS;
-
-	for (i = 1; i < base->ndigits && i * DEC_DIGITS < 16; i++)
-	{
-		f = f * NBASE + base->digits[i];
-		p -= DEC_DIGITS;
-	}
-
-	/*----------
-	 * We have base ~= f * 10^p
-	 * so log10(result) = log10(base^exp) ~= exp * (log10(f) + p)
-	 *----------
-	 */
-	f = exp * (log10(f) + p);
-
-	/*
-	 * Apply crude overflow/underflow tests so we can exit early if the result
-	 * certainly will overflow/underflow.
-	 */
-	if (f > 3 * SHRT_MAX * DEC_DIGITS)
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("value overflows numeric format")));
-	if (f + 1 < -rscale || f + 1 < -NUMERIC_MAX_DISPLAY_SCALE)
-	{
-		zero_var(result);
-		result->dscale = rscale;
-		return;
-	}
 
 	/*
 	 * Approximate number of significant digits in the result.  Note that the
-	 * underflow test above means that this is necessarily >= 0.
+	 * underflow test above, together with the choice of rscale, ensures that
+	 * this approximation is necessarily > 0.
 	 */
 	sig_digits = 1 + rscale + (int) f;
 
@@ -10583,7 +10636,7 @@ power_var_int(const NumericVar *base, int exp, NumericVar *result, int rscale)
 	 * Now we can proceed with the multiplications.
 	 */
 	neg = (exp < 0);
-	mask = Abs(exp);
+	mask = abs(exp);
 
 	init_var(&base_prod);
 	set_var_from_var(base, &base_prod);

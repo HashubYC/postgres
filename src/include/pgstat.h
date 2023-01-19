@@ -3,7 +3,7 @@
  *
  *	Definitions for the PostgreSQL cumulative statistics system.
  *
- *	Copyright (c) 2001-2022, PostgreSQL Global Development Group
+ *	Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  *	src/include/pgstat.h
  * ----------
@@ -242,7 +242,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCA7
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCA9
 
 typedef struct PgStat_ArchiverStats
 {
@@ -278,35 +278,35 @@ typedef struct PgStat_CheckpointerStats
 
 typedef struct PgStat_StatDBEntry
 {
-	PgStat_Counter n_xact_commit;
-	PgStat_Counter n_xact_rollback;
-	PgStat_Counter n_blocks_fetched;
-	PgStat_Counter n_blocks_hit;
-	PgStat_Counter n_tuples_returned;
-	PgStat_Counter n_tuples_fetched;
-	PgStat_Counter n_tuples_inserted;
-	PgStat_Counter n_tuples_updated;
-	PgStat_Counter n_tuples_deleted;
+	PgStat_Counter xact_commit;
+	PgStat_Counter xact_rollback;
+	PgStat_Counter blocks_fetched;
+	PgStat_Counter blocks_hit;
+	PgStat_Counter tuples_returned;
+	PgStat_Counter tuples_fetched;
+	PgStat_Counter tuples_inserted;
+	PgStat_Counter tuples_updated;
+	PgStat_Counter tuples_deleted;
 	TimestampTz last_autovac_time;
-	PgStat_Counter n_conflict_tablespace;
-	PgStat_Counter n_conflict_lock;
-	PgStat_Counter n_conflict_snapshot;
-	PgStat_Counter n_conflict_bufferpin;
-	PgStat_Counter n_conflict_startup_deadlock;
-	PgStat_Counter n_temp_files;
-	PgStat_Counter n_temp_bytes;
-	PgStat_Counter n_deadlocks;
-	PgStat_Counter n_checksum_failures;
+	PgStat_Counter conflict_tablespace;
+	PgStat_Counter conflict_lock;
+	PgStat_Counter conflict_snapshot;
+	PgStat_Counter conflict_bufferpin;
+	PgStat_Counter conflict_startup_deadlock;
+	PgStat_Counter temp_files;
+	PgStat_Counter temp_bytes;
+	PgStat_Counter deadlocks;
+	PgStat_Counter checksum_failures;
 	TimestampTz last_checksum_failure;
-	PgStat_Counter n_block_read_time;	/* times in microseconds */
-	PgStat_Counter n_block_write_time;
-	PgStat_Counter n_sessions;
-	PgStat_Counter total_session_time;
-	PgStat_Counter total_active_time;
-	PgStat_Counter total_idle_in_xact_time;
-	PgStat_Counter n_sessions_abandoned;
-	PgStat_Counter n_sessions_fatal;
-	PgStat_Counter n_sessions_killed;
+	PgStat_Counter blk_read_time;	/* times in microseconds */
+	PgStat_Counter blk_write_time;
+	PgStat_Counter sessions;
+	PgStat_Counter session_time;
+	PgStat_Counter active_time;
+	PgStat_Counter idle_in_transaction_time;
+	PgStat_Counter sessions_abandoned;
+	PgStat_Counter sessions_fatal;
+	PgStat_Counter sessions_killed;
 
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatDBEntry;
@@ -321,7 +321,6 @@ typedef struct PgStat_StatFuncEntry
 
 typedef struct PgStat_StatReplSlotEntry
 {
-	NameData	slotname;
 	PgStat_Counter spill_txns;
 	PgStat_Counter spill_count;
 	PgStat_Counter spill_bytes;
@@ -355,6 +354,7 @@ typedef struct PgStat_StatSubEntry
 typedef struct PgStat_StatTabEntry
 {
 	PgStat_Counter numscans;
+	TimestampTz lastscan;
 
 	PgStat_Counter tuples_returned;
 	PgStat_Counter tuples_fetched;
@@ -364,22 +364,22 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter tuples_deleted;
 	PgStat_Counter tuples_hot_updated;
 
-	PgStat_Counter n_live_tuples;
-	PgStat_Counter n_dead_tuples;
-	PgStat_Counter changes_since_analyze;
-	PgStat_Counter inserts_since_vacuum;
+	PgStat_Counter live_tuples;
+	PgStat_Counter dead_tuples;
+	PgStat_Counter mod_since_analyze;
+	PgStat_Counter ins_since_vacuum;
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
 
-	TimestampTz vacuum_timestamp;	/* user initiated vacuum */
+	TimestampTz last_vacuum_time;	/* user initiated vacuum */
 	PgStat_Counter vacuum_count;
-	TimestampTz autovac_vacuum_timestamp;	/* autovacuum initiated */
-	PgStat_Counter autovac_vacuum_count;
-	TimestampTz analyze_timestamp;	/* user initiated */
+	TimestampTz last_autovacuum_time;	/* autovacuum initiated */
+	PgStat_Counter autovacuum_count;
+	TimestampTz last_analyze_time;	/* user initiated */
 	PgStat_Counter analyze_count;
-	TimestampTz autovac_analyze_timestamp;	/* autovacuum initiated */
-	PgStat_Counter autovac_analyze_count;
+	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
+	PgStat_Counter autoanalyze_count;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -417,7 +417,7 @@ extern long pgstat_report_stat(bool force);
 extern void pgstat_force_next_flush(void);
 
 extern void pgstat_reset_counters(void);
-extern void pgstat_reset(PgStat_Kind kind, Oid dboid, Oid objectid);
+extern void pgstat_reset(PgStat_Kind kind, Oid dboid, Oid objoid);
 extern void pgstat_reset_of_kind(PgStat_Kind kind);
 
 /* stats accessors */
@@ -474,7 +474,8 @@ extern void pgstat_report_connect(Oid dboid);
 #define pgstat_count_conn_txn_idle_time(n)							\
 	(pgStatTransactionIdleTime += (n))
 
-extern PgStat_StatDBEntry *pgstat_fetch_stat_dbentry(Oid dbid);
+extern PgStat_StatDBEntry *pgstat_fetch_stat_dbentry(Oid dboid);
+
 
 /*
  * Functions in pgstat_function.c
@@ -489,7 +490,7 @@ extern void pgstat_init_function_usage(struct FunctionCallInfoBaseData *fcinfo,
 extern void pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu,
 									  bool finalize);
 
-extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid funcid);
+extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid func_id);
 extern PgStat_BackendFunctionEntry *find_funcstat_entry(Oid func_id);
 
 
@@ -499,7 +500,7 @@ extern PgStat_BackendFunctionEntry *find_funcstat_entry(Oid func_id);
 
 extern void pgstat_create_relation(Relation rel);
 extern void pgstat_drop_relation(Relation rel);
-extern void pgstat_copy_relation_stats(Relation dstrel, Relation srcrel);
+extern void pgstat_copy_relation_stats(Relation dst, Relation src);
 
 extern void pgstat_init_relation(Relation rel);
 extern void pgstat_assoc_relation(Relation rel);
@@ -571,7 +572,7 @@ extern void pgstat_twophase_postabort(TransactionId xid, uint16 info,
 
 extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry(Oid relid);
 extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry_ext(bool shared,
-														   Oid relid);
+														   Oid reloid);
 extern PgStat_TableStatus *find_tabstat_entry(Oid rel_id);
 
 

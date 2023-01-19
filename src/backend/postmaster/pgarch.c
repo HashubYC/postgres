@@ -14,7 +14,7 @@
  *
  *	Initial author: Simon Riggs		simon@2ndquadrant.com
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -144,7 +144,7 @@ static void pgarch_die(int code, Datum arg);
 static void HandlePgArchInterrupts(void);
 static int	ready_file_comparator(Datum a, Datum b, void *arg);
 static void LoadArchiveLibrary(void);
-static void call_archive_module_shutdown_callback(int code, Datum arg);
+static void pgarch_call_module_shutdown_cb(int code, Datum arg);
 
 /* Report shared memory space needed by PgArchShmemInit */
 Size
@@ -252,13 +252,7 @@ PgArchiverMain(void)
 	/* Load the archive_library. */
 	LoadArchiveLibrary();
 
-	PG_ENSURE_ERROR_CLEANUP(call_archive_module_shutdown_callback, 0);
-	{
-		pgarch_MainLoop();
-	}
-	PG_END_ENSURE_ERROR_CLEANUP(call_archive_module_shutdown_callback, 0);
-
-	call_archive_module_shutdown_callback(0, 0);
+	pgarch_MainLoop();
 
 	proc_exit(0);
 }
@@ -745,7 +739,19 @@ pgarch_archiveDone(char *xlog)
 
 	StatusFilePath(rlogready, xlog, ".ready");
 	StatusFilePath(rlogdone, xlog, ".done");
-	(void) durable_rename(rlogready, rlogdone, WARNING);
+
+	/*
+	 * To avoid extra overhead, we don't durably rename the .ready file to
+	 * .done.  Archive commands and libraries must gracefully handle attempts
+	 * to re-archive files (e.g., if the server crashes just before this
+	 * function is called), so it should be okay if the .ready file reappears
+	 * after a crash.
+	 */
+	if (rename(rlogready, rlogdone) < 0)
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not rename file \"%s\" to \"%s\": %m",
+						rlogready, rlogdone)));
 }
 
 
@@ -786,24 +792,25 @@ HandlePgArchInterrupts(void)
 		ConfigReloadPending = false;
 		ProcessConfigFile(PGC_SIGHUP);
 
+		if (XLogArchiveLibrary[0] != '\0' && XLogArchiveCommand[0] != '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("both archive_command and archive_library set"),
+					 errdetail("Only one of archive_command, archive_library may be set.")));
+
 		archiveLibChanged = strcmp(XLogArchiveLibrary, archiveLib) != 0;
 		pfree(archiveLib);
 
 		if (archiveLibChanged)
 		{
 			/*
-			 * Call the currently loaded archive module's shutdown callback,
-			 * if one is defined.
-			 */
-			call_archive_module_shutdown_callback(0, 0);
-
-			/*
 			 * Ideally, we would simply unload the previous archive module and
 			 * load the new one, but there is presently no mechanism for
 			 * unloading a library (see the comment above
 			 * internal_load_library()).  To deal with this, we simply restart
 			 * the archiver.  The new archive module will be loaded when the
-			 * new archiver process starts up.
+			 * new archiver process starts up.  Note that this triggers the
+			 * module's shutdown callback, if defined.
 			 */
 			ereport(LOG,
 					(errmsg("restarting archiver process because value of "
@@ -824,6 +831,12 @@ LoadArchiveLibrary(void)
 {
 	ArchiveModuleInit archive_init;
 
+	if (XLogArchiveLibrary[0] != '\0' && XLogArchiveCommand[0] != '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("both archive_command and archive_library set"),
+				 errdetail("Only one of archive_command, archive_library may be set.")));
+
 	memset(&ArchiveContext, 0, sizeof(ArchiveModuleCallbacks));
 
 	/*
@@ -839,22 +852,22 @@ LoadArchiveLibrary(void)
 
 	if (archive_init == NULL)
 		ereport(ERROR,
-				(errmsg("archive modules have to declare the _PG_archive_module_init symbol")));
+				(errmsg("archive modules have to define the symbol %s", "_PG_archive_module_init")));
 
 	(*archive_init) (&ArchiveContext);
 
 	if (ArchiveContext.archive_file_cb == NULL)
 		ereport(ERROR,
 				(errmsg("archive modules must register an archive callback")));
+
+	before_shmem_exit(pgarch_call_module_shutdown_cb, 0);
 }
 
 /*
- * call_archive_module_shutdown_callback
- *
- * Calls the loaded archive module's shutdown callback, if one is defined.
+ * Call the shutdown callback of the loaded archive module, if defined.
  */
 static void
-call_archive_module_shutdown_callback(int code, Datum arg)
+pgarch_call_module_shutdown_cb(int code, Datum arg)
 {
 	if (ArchiveContext.shutdown_cb != NULL)
 		ArchiveContext.shutdown_cb();

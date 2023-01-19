@@ -3,7 +3,7 @@
  * allpaths.c
  *	  Routines to find possible search paths for processing a query
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -554,12 +554,11 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	 * its own pool of workers.  Instead, we'll consider gathering partial
 	 * paths for the parent appendrel.
 	 *
-	 * Also, if this is the topmost scan/join rel (that is, the only baserel),
-	 * we postpone gathering until the final scan/join targetlist is available
-	 * (see grouping_planner).
+	 * Also, if this is the topmost scan/join rel, we postpone gathering until
+	 * the final scan/join targetlist is available (see grouping_planner).
 	 */
 	if (rel->reloptkind == RELOPT_BASEREL &&
-		bms_membership(root->all_baserels) != BMS_SINGLETON)
+		!bms_equal(rel->relids, root->all_baserels))
 		generate_useful_gather_paths(root, rel, false);
 
 	/* Now find the cheapest of the paths for this rel */
@@ -2307,6 +2306,7 @@ find_window_run_conditions(Query *subquery, RangeTblEntry *rte, Index rti,
 			{
 				*keep_original = false;
 				runopexpr = opexpr;
+				runoperator = opexpr->opno;
 				break;
 			}
 
@@ -2397,6 +2397,18 @@ check_and_push_window_quals(Query *subquery, RangeTblEntry *rte, Index rti,
 		return true;
 
 	if (list_length(opexpr->args) != 2)
+		return true;
+
+	/*
+	 * Currently, we restrict this optimization to strict OpExprs.  The reason
+	 * for this is that during execution, once the runcondition becomes false,
+	 * we stop evaluating WindowFuncs.  To avoid leaving around stale window
+	 * function result values, we set them to NULL.  Having only strict
+	 * OpExprs here ensures that we properly filter out the tuples with NULLs
+	 * in the top-level WindowAgg.
+	 */
+	set_opfuncid(opexpr);
+	if (!func_strict(opexpr->opfuncid))
 		return true;
 
 	/*
@@ -2575,7 +2587,7 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	if (parse->hasAggs ||
 		parse->groupClause ||
 		parse->groupingSets ||
-		parse->havingQual ||
+		root->hasHavingQual ||
 		parse->distinctClause ||
 		parse->sortClause ||
 		has_multiple_baserels(root))
@@ -3195,70 +3207,52 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 				continue;
 
 			/*
-			 * Consider regular sort for the cheapest partial path (for each
-			 * useful pathkeys). We know the path is not sorted, because we'd
-			 * not get here otherwise.
+			 * Try at least sorting the cheapest path and also try
+			 * incrementally sorting any path which is partially sorted
+			 * already (no need to deal with paths which have presorted keys
+			 * when incremental sort is disabled unless it's the cheapest
+			 * input path).
+			 */
+			if (subpath != cheapest_partial_path &&
+				(presorted_keys == 0 || !enable_incremental_sort))
+				continue;
+
+			/*
+			 * Consider regular sort for any path that's not presorted or if
+			 * incremental sort is disabled.  We've no need to consider both
+			 * sort and incremental sort on the same path.  We assume that
+			 * incremental sort is always faster when there are presorted
+			 * keys.
 			 *
 			 * This is not redundant with the gather paths created in
 			 * generate_gather_paths, because that doesn't generate ordered
 			 * output. Here we add an explicit sort to match the useful
 			 * ordering.
 			 */
-			if (cheapest_partial_path == subpath)
+			if (presorted_keys == 0 || !enable_incremental_sort)
 			{
-				Path	   *tmp;
-
-				tmp = (Path *) create_sort_path(root,
-												rel,
-												subpath,
-												useful_pathkeys,
-												-1.0);
-
-				rows = tmp->rows * tmp->parallel_workers;
-
-				path = create_gather_merge_path(root, rel,
-												tmp,
-												rel->reltarget,
-												tmp->pathkeys,
-												NULL,
-												rowsp);
-
-				add_path(rel, &path->path);
-
-				/* Fall through */
+				subpath = (Path *) create_sort_path(root,
+													rel,
+													subpath,
+													useful_pathkeys,
+													-1.0);
+				rows = subpath->rows * subpath->parallel_workers;
 			}
+			else
+				subpath = (Path *) create_incremental_sort_path(root,
+																rel,
+																subpath,
+																useful_pathkeys,
+																presorted_keys,
+																-1);
+			path = create_gather_merge_path(root, rel,
+											subpath,
+											rel->reltarget,
+											subpath->pathkeys,
+											NULL,
+											rowsp);
 
-			/*
-			 * Consider incremental sort, but only when the subpath is already
-			 * partially sorted on a pathkey prefix.
-			 */
-			if (enable_incremental_sort && presorted_keys > 0)
-			{
-				Path	   *tmp;
-
-				/*
-				 * We should have already excluded pathkeys of length 1
-				 * because then presorted_keys > 0 would imply is_sorted was
-				 * true.
-				 */
-				Assert(list_length(useful_pathkeys) != 1);
-
-				tmp = (Path *) create_incremental_sort_path(root,
-															rel,
-															subpath,
-															useful_pathkeys,
-															presorted_keys,
-															-1);
-
-				path = create_gather_merge_path(root, rel,
-												tmp,
-												rel->reltarget,
-												tmp->pathkeys,
-												NULL,
-												rowsp);
-
-				add_path(rel, &path->path);
-			}
+			add_path(rel, &path->path);
 		}
 	}
 }
@@ -3435,7 +3429,7 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 			 * partial paths.  We'll do the same for the topmost scan/join rel
 			 * once we know the final targetlist (see grouping_planner).
 			 */
-			if (lev < levels_needed)
+			if (!bms_equal(rel->relids, root->all_baserels))
 				generate_useful_gather_paths(root, rel, false);
 
 			/* Find and save the cheapest paths for this rel */
@@ -4273,12 +4267,24 @@ generate_partitionwise_join_paths(PlannerInfo *root, RelOptInfo *rel)
 		if (child_rel == NULL)
 			continue;
 
-		/* Add partitionwise join paths for partitioned child-joins. */
+		/* Make partitionwise join paths for this partitioned child-join. */
 		generate_partitionwise_join_paths(root, child_rel);
 
+		/* If we failed to make any path for this child, we must give up. */
+		if (child_rel->pathlist == NIL)
+		{
+			/*
+			 * Mark the parent joinrel as unpartitioned so that later
+			 * functions treat it correctly.
+			 */
+			rel->nparts = 0;
+			return;
+		}
+
+		/* Else, identify the cheapest path for it. */
 		set_cheapest(child_rel);
 
-		/* Dummy children will not be scanned, so ignore those. */
+		/* Dummy children need not be scanned, so ignore those. */
 		if (IS_DUMMY_REL(child_rel))
 			continue;
 

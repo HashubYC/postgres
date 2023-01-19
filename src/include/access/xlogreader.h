@@ -3,7 +3,7 @@
  * xlogreader.h
  *		Definitions for the generic XLog reading facility
  *
- * Portions Copyright (c) 2013-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2013-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		src/include/access/xlogreader.h
@@ -332,8 +332,6 @@ extern XLogReaderState *XLogReaderAllocate(int wal_segment_size,
 										   const char *waldir,
 										   XLogReaderRoutine *routine,
 										   void *private_data);
-extern XLogReaderRoutine *LocalXLogReaderRoutine(void);
-
 /* Free an XLogReader */
 extern void XLogReaderFree(XLogReaderState *state);
 
@@ -363,7 +361,7 @@ extern DecodedXLogRecord *XLogNextRecord(XLogReaderState *state,
 										 char **errormsg);
 
 /* Release the previously returned record, if necessary. */
-extern void XLogReleasePreviousRecord(XLogReaderState *state);
+extern XLogRecPtr XLogReleasePreviousRecord(XLogReaderState *state);
 
 /* Try to read ahead, if there is data and space. */
 extern DecodedXLogRecord *XLogReadAhead(XLogReaderState *state,
@@ -372,6 +370,9 @@ extern DecodedXLogRecord *XLogReadAhead(XLogReaderState *state,
 /* Validate a page */
 extern bool XLogReaderValidatePageHeader(XLogReaderState *state,
 										 XLogRecPtr recptr, char *phdr);
+
+/* Forget error produced by XLogReaderValidatePageHeader(). */
+extern void XLogReaderResetError(XLogReaderState *state);
 
 /*
  * Error information from WALRead that both backend and frontend caller can
@@ -397,7 +398,7 @@ extern bool DecodeXLogRecord(XLogReaderState *state,
 							 DecodedXLogRecord *decoded,
 							 XLogRecord *record,
 							 XLogRecPtr lsn,
-							 char **errmsg);
+							 char **errormsg);
 
 /*
  * Macros that provide access to parts of the record most recently returned by

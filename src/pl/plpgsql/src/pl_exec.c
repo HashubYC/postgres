@@ -3,7 +3,7 @@
  * pl_exec.c		- Executor for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -374,7 +374,7 @@ static ParamListInfo setup_param_list(PLpgSQL_execstate *estate,
 									  PLpgSQL_expr *expr);
 static ParamExternData *plpgsql_param_fetch(ParamListInfo params,
 											int paramid, bool speculative,
-											ParamExternData *workspace);
+											ParamExternData *prm);
 static void plpgsql_param_compile(ParamListInfo params, Param *param,
 								  ExprState *state,
 								  Datum *resv, bool *resnull);

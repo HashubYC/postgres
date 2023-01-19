@@ -3,7 +3,7 @@
  * pathnode.c
  *	  Routines to manipulate pathlists and create path nodes
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1346,12 +1346,12 @@ create_append_path(PlannerInfo *root,
 			pathnode->path.total_cost = child->total_cost;
 		}
 		else
-			cost_append(pathnode, root);
+			cost_append(pathnode);
 		/* Must do this last, else cost_append complains */
 		pathnode->path.pathkeys = child->pathkeys;
 	}
 	else
-		cost_append(pathnode, root);
+		cost_append(pathnode);
 
 	/* If the caller provided a row estimate, override the computed value. */
 	if (rows >= 0)
@@ -3630,7 +3630,8 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
 
 /*
  * create_modifytable_path
- *	  Creates a pathnode that represents performing INSERT/UPDATE/DELETE mods
+ *	  Creates a pathnode that represents performing INSERT/UPDATE/DELETE/MERGE
+ *	  mods
  *
  * 'rel' is the parent relation associated with the result
  * 'subpath' is a Path producing source data
@@ -3978,12 +3979,30 @@ reparameterize_path(PlannerInfo *root, Path *path,
 									   apath->path.parallel_aware,
 									   -1);
 			}
+		case T_Material:
+			{
+				MaterialPath *mpath = (MaterialPath *) path;
+				Path	   *spath = mpath->subpath;
+
+				spath = reparameterize_path(root, spath,
+											required_outer,
+											loop_count);
+				if (spath == NULL)
+					return NULL;
+				return (Path *) create_material_path(rel, spath);
+			}
 		case T_Memoize:
 			{
 				MemoizePath *mpath = (MemoizePath *) path;
+				Path	   *spath = mpath->subpath;
 
+				spath = reparameterize_path(root, spath,
+											required_outer,
+											loop_count);
+				if (spath == NULL)
+					return NULL;
 				return (Path *) create_memoize_path(root, rel,
-													mpath->subpath,
+													spath,
 													mpath->param_exprs,
 													mpath->hash_operators,
 													mpath->singlerow,
@@ -4012,7 +4031,8 @@ reparameterize_path(PlannerInfo *root, Path *path,
  * path->parent, which does not change during the translation. Hence those
  * members are copied as they are.
  *
- * If the given path can not be reparameterized, the function returns NULL.
+ * Currently, only a few path types are supported here, though more could be
+ * added at need.  We return NULL if we can't reparameterize the given path.
  */
 Path *
 reparameterize_path_by_child(PlannerInfo *root, Path *path,
@@ -4026,8 +4046,8 @@ reparameterize_path_by_child(PlannerInfo *root, Path *path,
 #define ADJUST_CHILD_ATTRS(node) \
 	((node) = \
 	 (List *) adjust_appendrel_attrs_multilevel(root, (Node *) (node), \
-												child_rel->relids, \
-												child_rel->top_parent_relids))
+												child_rel, \
+												child_rel->top_parent))
 
 #define REPARAMETERIZE_CHILD_PATH(path) \
 do { \
@@ -4210,12 +4230,23 @@ do { \
 			}
 			break;
 
+		case T_MaterialPath:
+			{
+				MaterialPath *mpath;
+
+				FLAT_COPY_PATH(mpath, path, MaterialPath);
+				REPARAMETERIZE_CHILD_PATH(mpath->subpath);
+				new_path = (Path *) mpath;
+			}
+			break;
+
 		case T_MemoizePath:
 			{
 				MemoizePath *mpath;
 
 				FLAT_COPY_PATH(mpath, path, MemoizePath);
 				REPARAMETERIZE_CHILD_PATH(mpath->subpath);
+				ADJUST_CHILD_ATTRS(mpath->param_exprs);
 				new_path = (Path *) mpath;
 			}
 			break;
@@ -4244,8 +4275,8 @@ do { \
 	old_ppi = new_path->param_info;
 	required_outer =
 		adjust_child_relids_multilevel(root, old_ppi->ppi_req_outer,
-									   child_rel->relids,
-									   child_rel->top_parent_relids);
+									   child_rel,
+									   child_rel->top_parent);
 
 	/* If we already have a PPI for this parameterization, just return it */
 	new_ppi = find_param_path_info(new_path->parent, required_outer);

@@ -1053,6 +1053,15 @@ INSERT INTO num_input_test(n1) VALUES ('+ infinity');
 
 SELECT * FROM num_input_test;
 
+-- Also try it with non-error-throwing API
+SELECT pg_input_is_valid('34.5', 'numeric');
+SELECT pg_input_is_valid('34xyz', 'numeric');
+SELECT pg_input_is_valid('1e400000', 'numeric');
+SELECT pg_input_error_message('1e400000', 'numeric');
+SELECT pg_input_is_valid('1234.567', 'numeric(8,4)');
+SELECT pg_input_is_valid('1234.567', 'numeric(7,4)');
+SELECT pg_input_error_message('1234.567', 'numeric(7,4)');
+
 --
 -- Test precision and scale typemods
 --
@@ -1142,8 +1151,8 @@ select 10.0 ^ 2147483647 as overflows;
 select 117743296169.0 ^ 1000000000 as overflows;
 
 -- cases that used to return inaccurate results
-select 3.789 ^ 21;
-select 3.789 ^ 35;
+select 3.789 ^ 21.0000000000000000;
+select 3.789 ^ 35.0000000000000000;
 select 1.2 ^ 345;
 select 0.12 ^ (-20);
 select 1.000000000123 ^ (-2147483648);
@@ -1161,6 +1170,10 @@ select (-1.0) ^ 2147483647;
 select (-1.0) ^ 2147483648;
 select (-1.0) ^ 1000000000000000;
 select (-1.0) ^ 1000000000000001;
+
+-- integer powers of 10
+select n, 10.0 ^ n as "10^n", (10.0 ^ n) * (10.0 ^ (-n)) = 1 as ok
+from generate_series(-20, 20) n;
 
 --
 -- Tests for raising to non-integer powers

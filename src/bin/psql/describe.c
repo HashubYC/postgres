@@ -7,7 +7,7 @@
  * information for an old server, but not to fail outright.  (But failing
  * against a pre-9.2 server is allowed.)
  *
- * Copyright (c) 2000-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2023, PostgreSQL Global Development Group
  *
  * src/bin/psql/describe.c
  */
@@ -1002,7 +1002,7 @@ listAllDbs(const char *pattern, bool verbose)
  * \z (now also \dp -- perhaps more mnemonic)
  */
 bool
-permissionsList(const char *pattern)
+permissionsList(const char *pattern, bool showSystem)
 {
 	PQExpBufferData buf;
 	PGresult   *res;
@@ -1121,15 +1121,13 @@ permissionsList(const char *pattern)
 						 CppAsString2(RELKIND_FOREIGN_TABLE) ","
 						 CppAsString2(RELKIND_PARTITIONED_TABLE) ")\n");
 
-	/*
-	 * Unless a schema pattern is specified, we suppress system and temp
-	 * tables, since they normally aren't very interesting from a permissions
-	 * point of view.  You can see 'em by explicit request though, eg with \z
-	 * pg_catalog.*
-	 */
+	if (!showSystem && !pattern)
+		appendPQExpBufferStr(&buf, "      AND n.nspname <> 'pg_catalog'\n"
+							 "      AND n.nspname <> 'information_schema'\n");
+
 	if (!validateSQLNamePattern(&buf, pattern, true, false,
 								"n.nspname", "c.relname", NULL,
-								"n.nspname !~ '^pg_' AND pg_catalog.pg_table_is_visible(c.oid)",
+								"pg_catalog.pg_table_is_visible(c.oid)",
 								NULL, 3))
 		goto error_return;
 
@@ -2148,9 +2146,9 @@ describeOneTableDetails(const char *schemaname,
 						  "SELECT inhparent::pg_catalog.regclass,\n"
 						  "  pg_catalog.pg_get_expr(c.relpartbound, c.oid),\n  ");
 
-		appendPQExpBuffer(&buf,
-						  pset.sversion >= 140000 ? "inhdetachpending" :
-						  "false as inhdetachpending");
+		appendPQExpBufferStr(&buf,
+							 pset.sversion >= 140000 ? "inhdetachpending" :
+							 "false as inhdetachpending");
 
 		/* If verbose, also request the partition constraint definition */
 		if (verbose)
@@ -2311,7 +2309,7 @@ describeOneTableDetails(const char *schemaname,
 				printfPQExpBuffer(&tmpbuf, _("unique"));
 				if (strcmp(indnullsnotdistinct, "t") == 0)
 					appendPQExpBufferStr(&tmpbuf, _(" nulls not distinct"));
-				appendPQExpBuffer(&tmpbuf, _(", "));
+				appendPQExpBufferStr(&tmpbuf, _(", "));
 			}
 			else
 				resetPQExpBuffer(&tmpbuf);
@@ -3445,6 +3443,8 @@ describeOneTableDetails(const char *schemaname,
 				if (child_relkind == RELKIND_PARTITIONED_TABLE ||
 					child_relkind == RELKIND_PARTITIONED_INDEX)
 					appendPQExpBufferStr(&buf, ", PARTITIONED");
+				else if (child_relkind == RELKIND_FOREIGN_TABLE)
+					appendPQExpBufferStr(&buf, ", FOREIGN");
 				if (strcmp(PQgetvalue(result, i, 2), "t") == 0)
 					appendPQExpBufferStr(&buf, " (DETACH PENDING)");
 				if (i < tuples - 1)
@@ -3767,13 +3767,16 @@ listDbRoleSettings(const char *pattern, const char *pattern2)
 	initPQExpBuffer(&buf);
 
 	printfPQExpBuffer(&buf, "SELECT rolname AS \"%s\", datname AS \"%s\",\n"
-					  "pg_catalog.array_to_string(setconfig, E'\\n') AS \"%s\"\n"
-					  "FROM pg_catalog.pg_db_role_setting s\n"
-					  "LEFT JOIN pg_catalog.pg_database d ON d.oid = setdatabase\n"
-					  "LEFT JOIN pg_catalog.pg_roles r ON r.oid = setrole\n",
+					  "pg_catalog.array_to_string(setconfig, E'\\n') AS \"%s\"",
 					  gettext_noop("Role"),
 					  gettext_noop("Database"),
 					  gettext_noop("Settings"));
+	if (pset.sversion >= 160000)
+		appendPQExpBuffer(&buf, ",\npg_catalog.array_to_string(setuser, E'\\n') AS \"%s\"",
+						  gettext_noop("User set"));
+	appendPQExpBuffer(&buf, "\nFROM pg_catalog.pg_db_role_setting s\n"
+					  "LEFT JOIN pg_catalog.pg_database d ON d.oid = setdatabase\n"
+					  "LEFT JOIN pg_catalog.pg_roles r ON r.oid = setrole\n");
 	if (!validateSQLNamePattern(&buf, pattern, false, false,
 								NULL, "r.rolname", NULL, NULL, &havewhere, 1))
 		goto error_return;
@@ -6497,11 +6500,24 @@ describeSubscriptions(const char *pattern, bool verbose)
 	{
 		/* Binary mode and streaming are only supported in v14 and higher */
 		if (pset.sversion >= 140000)
+		{
 			appendPQExpBuffer(&buf,
-							  ", subbinary AS \"%s\"\n"
-							  ", substream AS \"%s\"\n",
-							  gettext_noop("Binary"),
-							  gettext_noop("Streaming"));
+							  ", subbinary AS \"%s\"\n",
+							  gettext_noop("Binary"));
+
+			if (pset.sversion >= 160000)
+				appendPQExpBuffer(&buf,
+								  ", (CASE substream\n"
+								  "    WHEN 'f' THEN 'off'\n"
+								  "    WHEN 't' THEN 'on'\n"
+								  "    WHEN 'p' THEN 'parallel'\n"
+								  "   END) AS \"%s\"\n",
+								  gettext_noop("Streaming"));
+			else
+				appendPQExpBuffer(&buf,
+								  ", substream AS \"%s\"\n",
+								  gettext_noop("Streaming"));
+		}
 
 		/* Two_phase and disable_on_error are only supported in v15 and higher */
 		if (pset.sversion >= 150000)

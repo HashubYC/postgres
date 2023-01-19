@@ -3,7 +3,7 @@
  * connection.c
  *		  Connection management functions for postgres_fdw
  *
- * Portions Copyright (c) 2012-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2012-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/postgres_fdw/connection.c
@@ -1668,7 +1668,7 @@ postgres_fdw_get_connections(PG_FUNCTION_ARGS)
 	HASH_SEQ_STATUS scan;
 	ConnCacheEntry *entry;
 
-	SetSingleFuncCall(fcinfo, 0);
+	InitMaterializedSRF(fcinfo, 0);
 
 	/* If cache doesn't exist, we return no records */
 	if (!ConnectionHash)

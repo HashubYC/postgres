@@ -3,7 +3,7 @@
  * nodeHashjoin.c
  *	  Routines to handle hash join nodes
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -145,7 +145,7 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 												 TupleTableSlot *tupleSlot);
 static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
-static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
+static void ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate);
 
 
 /* ----------------------------------------------------------------
@@ -1227,8 +1227,8 @@ ExecHashJoinSaveTuple(MinimalTuple tuple, uint32 hashvalue,
 		*fileptr = file;
 	}
 
-	BufFileWrite(file, (void *) &hashvalue, sizeof(uint32));
-	BufFileWrite(file, (void *) tuple, tuple->t_len);
+	BufFileWrite(file, &hashvalue, sizeof(uint32));
+	BufFileWrite(file, tuple, tuple->t_len);
 }
 
 /*
@@ -1260,28 +1260,18 @@ ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 	 * we can read them both in one BufFileRead() call without any type
 	 * cheating.
 	 */
-	nread = BufFileRead(file, (void *) header, sizeof(header));
+	nread = BufFileReadMaybeEOF(file, header, sizeof(header), true);
 	if (nread == 0)				/* end of file */
 	{
 		ExecClearTuple(tupleSlot);
 		return NULL;
 	}
-	if (nread != sizeof(header))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not read from hash-join temporary file: read only %zu of %zu bytes",
-						nread, sizeof(header))));
 	*hashvalue = header[0];
 	tuple = (MinimalTuple) palloc(header[1]);
 	tuple->t_len = header[1];
-	nread = BufFileRead(file,
-						(void *) ((char *) tuple + sizeof(uint32)),
-						header[1] - sizeof(uint32));
-	if (nread != header[1] - sizeof(uint32))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not read from hash-join temporary file: read only %zu of %zu bytes",
-						nread, header[1] - sizeof(uint32))));
+	BufFileReadExact(file,
+					 (char *) tuple + sizeof(uint32),
+					 header[1] - sizeof(uint32));
 	ExecForceStoreMinimalTuple(tuple, tupleSlot, true);
 	return tupleSlot;
 }
@@ -1502,11 +1492,11 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
  * ----------------------------------------------------------------
  */
 void
-ExecHashJoinReInitializeDSM(HashJoinState *state, ParallelContext *cxt)
+ExecHashJoinReInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 {
 	int			plan_node_id = state->js.ps.plan->plan_node_id;
 	ParallelHashJoinState *pstate =
-	shm_toc_lookup(cxt->toc, plan_node_id, false);
+	shm_toc_lookup(pcxt->toc, plan_node_id, false);
 
 	/*
 	 * It would be possible to reuse the shared hash table in single-batch

@@ -4,7 +4,7 @@
  *	  Routines to support inter-object dependencies.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -28,6 +28,7 @@
 #include "catalog/pg_amproc.h"
 #include "catalog/pg_attrdef.h"
 #include "catalog/pg_authid.h"
+#include "catalog/pg_auth_members.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
@@ -172,6 +173,7 @@ static const Oid object_classes[] = {
 	TSTemplateRelationId,		/* OCLASS_TSTEMPLATE */
 	TSConfigRelationId,			/* OCLASS_TSCONFIG */
 	AuthIdRelationId,			/* OCLASS_ROLE */
+	AuthMemRelationId,			/* OCLASS_ROLE_MEMBERSHIP */
 	DatabaseRelationId,			/* OCLASS_DATABASE */
 	TableSpaceRelationId,		/* OCLASS_TBLSPACE */
 	ForeignDataWrapperRelationId,	/* OCLASS_FDW */
@@ -188,6 +190,12 @@ static const Oid object_classes[] = {
 	SubscriptionRelationId,		/* OCLASS_SUBSCRIPTION */
 	TransformRelationId			/* OCLASS_TRANSFORM */
 };
+
+/*
+ * Make sure object_classes is kept up to date with the ObjectClass enum.
+ */
+StaticAssertDecl(lengthof(object_classes) == LAST_OCLASS + 1,
+				 "object_classes[] must cover all ObjectClasses");
 
 
 static void findDependentObjects(const ObjectAddress *object,
@@ -1190,14 +1198,14 @@ reportDependentObjects(const ObjectAddresses *targetObjects,
 					(errcode(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
 					 errmsg("cannot drop %s because other objects depend on it",
 							getObjectDescription(origObject, false)),
-					 errdetail("%s", clientdetail.data),
+					 errdetail_internal("%s", clientdetail.data),
 					 errdetail_log("%s", logdetail.data),
 					 errhint("Use DROP ... CASCADE to drop the dependent objects too.")));
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
 					 errmsg("cannot drop desired object(s) because other objects depend on them"),
-					 errdetail("%s", clientdetail.data),
+					 errdetail_internal("%s", clientdetail.data),
 					 errdetail_log("%s", logdetail.data),
 					 errhint("Use DROP ... CASCADE to drop the dependent objects too.")));
 	}
@@ -1208,7 +1216,7 @@ reportDependentObjects(const ObjectAddresses *targetObjects,
 							   "drop cascades to %d other objects",
 							   numReportedClient + numNotReportedClient,
 							   numReportedClient + numNotReportedClient),
-				 errdetail("%s", clientdetail.data),
+				 errdetail_internal("%s", clientdetail.data),
 				 errdetail_log("%s", logdetail.data)));
 	}
 	else if (numReportedClient == 1)
@@ -1502,6 +1510,7 @@ doDeletion(const ObjectAddress *object, int flags)
 		case OCLASS_DEFACL:
 		case OCLASS_EVENT_TRIGGER:
 		case OCLASS_TRANSFORM:
+		case OCLASS_ROLE_MEMBERSHIP:
 			DropObjectById(object);
 			break;
 
@@ -1529,9 +1538,8 @@ doDeletion(const ObjectAddress *object, int flags)
  * Accepts the same flags as performDeletion (though currently only
  * PERFORM_DELETION_CONCURRENTLY does anything).
  *
- * We use LockRelation for relations, LockDatabaseObject for everything
- * else.  Shared-across-databases objects are not currently supported
- * because no caller cares, but could be modified to use LockSharedObject.
+ * We use LockRelation for relations, and otherwise LockSharedObject or
+ * LockDatabaseObject as appropriate for the object type.
  */
 void
 AcquireDeletionLock(const ObjectAddress *object, int flags)
@@ -1549,6 +1557,9 @@ AcquireDeletionLock(const ObjectAddress *object, int flags)
 		else
 			LockRelationOid(object->objectId, AccessExclusiveLock);
 	}
+	else if (object->classId == AuthMemRelationId)
+		LockSharedObject(object->classId, object->objectId, 0,
+						 AccessExclusiveLock);
 	else
 	{
 		/* assume we should lock the whole object not a sub-object */
@@ -2545,12 +2556,6 @@ add_object_address(ObjectClass oclass, Oid objectId, int32 subId,
 {
 	ObjectAddress *item;
 
-	/*
-	 * Make sure object_classes is kept up to date with the ObjectClass enum.
-	 */
-	StaticAssertStmt(lengthof(object_classes) == LAST_OCLASS + 1,
-					 "object_classes[] must cover all ObjectClasses");
-
 	/* enlarge array if needed */
 	if (addrs->numrefs >= addrs->maxrefs)
 	{
@@ -2913,6 +2918,9 @@ getObjectClass(const ObjectAddress *object)
 
 		case AuthIdRelationId:
 			return OCLASS_ROLE;
+
+		case AuthMemRelationId:
+			return OCLASS_ROLE_MEMBERSHIP;
 
 		case DatabaseRelationId:
 			return OCLASS_DATABASE;

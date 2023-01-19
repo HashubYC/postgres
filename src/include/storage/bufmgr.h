@@ -4,7 +4,7 @@
  *	  POSTGRES buffer manager definitions.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/bufmgr.h
@@ -69,6 +69,15 @@ extern PGDLLIMPORT bool zero_damaged_pages;
 extern PGDLLIMPORT int bgwriter_lru_maxpages;
 extern PGDLLIMPORT double bgwriter_lru_multiplier;
 extern PGDLLIMPORT bool track_io_timing;
+
+/* only applicable when prefetching is available */
+#ifdef USE_PREFETCH
+#define DEFAULT_EFFECTIVE_IO_CONCURRENCY 1
+#define DEFAULT_MAINTENANCE_IO_CONCURRENCY 10
+#else
+#define DEFAULT_EFFECTIVE_IO_CONCURRENCY 0
+#define DEFAULT_MAINTENANCE_IO_CONCURRENCY 0
+#endif
 extern PGDLLIMPORT int effective_io_concurrency;
 extern PGDLLIMPORT int maintenance_io_concurrency;
 
@@ -123,7 +132,6 @@ extern void IncrBufferRefCount(Buffer buffer);
 extern Buffer ReleaseAndReadBuffer(Buffer buffer, Relation relation,
 								   BlockNumber blockNum);
 
-extern void InitBufferPool(void);
 extern void InitBufferPoolAccess(void);
 extern void AtEOXact_Buffers(bool isCommit);
 extern void PrintBufferLeakWarning(Buffer buffer);
@@ -154,7 +162,6 @@ extern XLogRecPtr BufferGetLSNAtomic(Buffer buffer);
 #ifdef NOT_USED
 extern void PrintPinnedBufs(void);
 #endif
-extern Size BufferShmemSize(void);
 extern void BufferGetTag(Buffer buffer, RelFileLocator *rlocator,
 						 ForkNumber *forknum, BlockNumber *blknum);
 
@@ -173,9 +180,14 @@ extern void AbortBufferIO(void);
 extern void BufmgrCommit(void);
 extern bool BgBufferSync(struct WritebackContext *wb_context);
 
-extern void AtProcExit_LocalBuffers(void);
-
 extern void TestForOldSnapshot_impl(Snapshot snapshot, Relation relation);
+
+/* in buf_init.c */
+extern void InitBufferPool(void);
+extern Size BufferShmemSize(void);
+
+/* in localbuf.c */
+extern void AtProcExit_LocalBuffers(void);
 
 /* in freelist.c */
 extern BufferAccessStrategy GetAccessStrategy(BufferAccessStrategyType btype);

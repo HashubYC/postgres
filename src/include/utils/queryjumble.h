@@ -3,7 +3,7 @@
  * queryjumble.h
  *	  Query normalization and fingerprinting.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -15,8 +15,6 @@
 #define QUERYJUBLE_H
 
 #include "nodes/parsenodes.h"
-
-#define JUMBLE_SIZE				1024	/* query serialization buffer size */
 
 /*
  * Struct for tracking locations/lengths of constants during normalization

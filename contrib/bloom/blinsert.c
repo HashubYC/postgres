@@ -3,7 +3,7 @@
  * blinsert.c
  *		Bloom index build and insert functions.
  *
- * Copyright (c) 2016-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/bloom/blinsert.c
@@ -232,8 +232,6 @@ blinsert(Relation index, Datum *values, bool *isnull,
 
 	if (metaData->nEnd > metaData->nStart)
 	{
-		Page		page;
-
 		blkno = metaData->notFullPage[metaData->nStart];
 		Assert(blkno != InvalidBlockNumber);
 

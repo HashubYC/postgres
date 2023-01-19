@@ -4,7 +4,7 @@
  *	  prototypes for files in optimizer/prep/
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/prep.h
@@ -45,7 +45,7 @@ extern PlanRowMark *get_plan_rowmark(List *rowmarks, Index rtindex);
  * prototypes for prepagg.c
  */
 extern void get_agg_clause_costs(PlannerInfo *root, AggSplit aggsplit,
-								 AggClauseCosts *agg_costs);
+								 AggClauseCosts *costs);
 extern void preprocess_aggrefs(PlannerInfo *root, Node *clause);
 
 /*

@@ -14,7 +14,7 @@
  * hard postmaster crash, remaining segments will be removed, if they
  * still exist, at the next postmaster startup.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1045,7 +1045,7 @@ dsm_unpin_segment(dsm_handle handle)
  * Find an existing mapping for a shared memory segment, if there is one.
  */
 dsm_segment *
-dsm_find_mapping(dsm_handle h)
+dsm_find_mapping(dsm_handle handle)
 {
 	dlist_iter	iter;
 	dsm_segment *seg;
@@ -1053,7 +1053,7 @@ dsm_find_mapping(dsm_handle h)
 	dlist_foreach(iter, &dsm_segment_list)
 	{
 		seg = dlist_container(dsm_segment, node, iter.cur);
-		if (seg->handle == h)
+		if (seg->handle == handle)
 			return seg;
 	}
 

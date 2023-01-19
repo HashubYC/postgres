@@ -3,7 +3,7 @@
  * test_decoding.c
  *		  example logical decoding output plugin
  *
- * Copyright (c) 2012-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/test_decoding/test_decoding.c
@@ -60,7 +60,7 @@ static void pg_output_begin(LogicalDecodingContext *ctx,
 static void pg_decode_commit_txn(LogicalDecodingContext *ctx,
 								 ReorderBufferTXN *txn, XLogRecPtr commit_lsn);
 static void pg_decode_change(LogicalDecodingContext *ctx,
-							 ReorderBufferTXN *txn, Relation rel,
+							 ReorderBufferTXN *txn, Relation relation,
 							 ReorderBufferChange *change);
 static void pg_decode_truncate(LogicalDecodingContext *ctx,
 							   ReorderBufferTXN *txn,
@@ -69,7 +69,7 @@ static void pg_decode_truncate(LogicalDecodingContext *ctx,
 static bool pg_decode_filter(LogicalDecodingContext *ctx,
 							 RepOriginId origin_id);
 static void pg_decode_message(LogicalDecodingContext *ctx,
-							  ReorderBufferTXN *txn, XLogRecPtr message_lsn,
+							  ReorderBufferTXN *txn, XLogRecPtr lsn,
 							  bool transactional, const char *prefix,
 							  Size sz, const char *message);
 static bool pg_decode_filter_prepare(LogicalDecodingContext *ctx,
@@ -109,7 +109,7 @@ static void pg_decode_stream_change(LogicalDecodingContext *ctx,
 									Relation relation,
 									ReorderBufferChange *change);
 static void pg_decode_stream_message(LogicalDecodingContext *ctx,
-									 ReorderBufferTXN *txn, XLogRecPtr message_lsn,
+									 ReorderBufferTXN *txn, XLogRecPtr lsn,
 									 bool transactional, const char *prefix,
 									 Size sz, const char *message);
 static void pg_decode_stream_truncate(LogicalDecodingContext *ctx,

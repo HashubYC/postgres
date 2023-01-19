@@ -17,7 +17,7 @@
  * scan all the rows anyway.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -245,7 +245,7 @@ can_minmax_aggs(PlannerInfo *root, List **context)
 	foreach(lc, root->agginfos)
 	{
 		AggInfo    *agginfo = lfirst_node(AggInfo, lc);
-		Aggref	   *aggref = agginfo->representative_aggref;
+		Aggref	   *aggref = linitial_node(Aggref, agginfo->aggrefs);
 		Oid			aggsortop;
 		TargetEntry *curTarget;
 		MinMaxAggInfo *mminfo;

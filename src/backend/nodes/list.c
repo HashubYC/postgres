@@ -6,7 +6,7 @@
  * See comments in pg_list.h.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -747,7 +747,7 @@ list_member_xid(const List *list, TransactionId datum)
 
 	foreach(cell, list)
 	{
-		if (lfirst_oid(cell) == datum)
+		if (lfirst_xid(cell) == datum)
 			return true;
 	}
 

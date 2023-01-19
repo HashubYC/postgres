@@ -3,7 +3,7 @@
  *
  *	server checks and output routines
  *
- *	Copyright (c) 2010-2022, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/check.c
  */
 
@@ -28,6 +28,7 @@ static void check_for_incompatible_polymorphics(ClusterInfo *cluster);
 static void check_for_tables_with_oids(ClusterInfo *cluster);
 static void check_for_composite_data_type_usage(ClusterInfo *cluster);
 static void check_for_reg_data_type_usage(ClusterInfo *cluster);
+static void check_for_aclitem_data_type_usage(ClusterInfo *cluster);
 static void check_for_jsonb_9_4_usage(ClusterInfo *cluster);
 static void check_for_pg_role_prefix(ClusterInfo *cluster);
 static void check_for_new_tablespace_dir(ClusterInfo *new_cluster);
@@ -106,6 +107,13 @@ check_and_dump_old_cluster(bool live_check)
 	check_for_composite_data_type_usage(&old_cluster);
 	check_for_reg_data_type_usage(&old_cluster);
 	check_for_isn_and_int8_passing_mismatch(&old_cluster);
+
+	/*
+	 * PG 16 increased the size of the 'aclitem' type, which breaks the on-disk
+	 * format for existing data.
+	 */
+	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 1500)
+		check_for_aclitem_data_type_usage(&old_cluster);
 
 	/*
 	 * PG 14 changed the function signature of encoding conversion functions.
@@ -711,7 +719,6 @@ check_proper_datallowconn(ClusterInfo *cluster)
 	int			i_datallowconn;
 	FILE	   *script = NULL;
 	char		output_path[MAXPGPATH];
-	bool		found = false;
 
 	prep_status("Checking database connection settings");
 
@@ -750,7 +757,6 @@ check_proper_datallowconn(ClusterInfo *cluster)
 			 */
 			if (strcmp(datallowconn, "f") == 0)
 			{
-				found = true;
 				if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
 					pg_fatal("could not open file \"%s\": %s",
 							 output_path, strerror(errno));
@@ -765,10 +771,8 @@ check_proper_datallowconn(ClusterInfo *cluster)
 	PQfinish(conn_template1);
 
 	if (script)
-		fclose(script);
-
-	if (found)
 	{
+		fclose(script);
 		pg_log(PG_REPORT, "fatal");
 		pg_fatal("All non-template0 databases must allow connections, i.e. their\n"
 				 "pg_database.datallowconn must be true.  Your installation contains\n"
@@ -829,7 +833,6 @@ check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster)
 {
 	int			dbnum;
 	FILE	   *script = NULL;
-	bool		found = false;
 	char		output_path[MAXPGPATH];
 
 	prep_status("Checking for contrib/isn with bigint-passing mismatch");
@@ -870,7 +873,6 @@ check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster)
 		i_proname = PQfnumber(res, "proname");
 		for (rowno = 0; rowno < ntups; rowno++)
 		{
-			found = true;
 			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
 				pg_fatal("could not open file \"%s\": %s",
 						 output_path, strerror(errno));
@@ -890,10 +892,8 @@ check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster)
 	}
 
 	if (script)
-		fclose(script);
-
-	if (found)
 	{
+		fclose(script);
 		pg_log(PG_REPORT, "fatal");
 		pg_fatal("Your installation contains \"contrib/isn\" functions which rely on the\n"
 				 "bigint data type.  Your old and new clusters pass bigint values\n"
@@ -915,7 +915,6 @@ check_for_user_defined_postfix_ops(ClusterInfo *cluster)
 {
 	int			dbnum;
 	FILE	   *script = NULL;
-	bool		found = false;
 	char		output_path[MAXPGPATH];
 
 	prep_status("Checking for user-defined postfix operators");
@@ -968,7 +967,6 @@ check_for_user_defined_postfix_ops(ClusterInfo *cluster)
 		i_typname = PQfnumber(res, "typname");
 		for (rowno = 0; rowno < ntups; rowno++)
 		{
-			found = true;
 			if (script == NULL &&
 				(script = fopen_priv(output_path, "w")) == NULL)
 				pg_fatal("could not open file \"%s\": %s",
@@ -992,10 +990,8 @@ check_for_user_defined_postfix_ops(ClusterInfo *cluster)
 	}
 
 	if (script)
-		fclose(script);
-
-	if (found)
 	{
+		fclose(script);
 		pg_log(PG_REPORT, "fatal");
 		pg_fatal("Your installation contains user-defined postfix operators, which are not\n"
 				 "supported anymore.  Consider dropping the postfix operators and replacing\n"
@@ -1145,7 +1141,6 @@ check_for_tables_with_oids(ClusterInfo *cluster)
 {
 	int			dbnum;
 	FILE	   *script = NULL;
-	bool		found = false;
 	char		output_path[MAXPGPATH];
 
 	prep_status("Checking for tables WITH OIDS");
@@ -1179,7 +1174,6 @@ check_for_tables_with_oids(ClusterInfo *cluster)
 		i_relname = PQfnumber(res, "relname");
 		for (rowno = 0; rowno < ntups; rowno++)
 		{
-			found = true;
 			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
 				pg_fatal("could not open file \"%s\": %s",
 						 output_path, strerror(errno));
@@ -1199,10 +1193,8 @@ check_for_tables_with_oids(ClusterInfo *cluster)
 	}
 
 	if (script)
-		fclose(script);
-
-	if (found)
 	{
+		fclose(script);
 		pg_log(PG_REPORT, "fatal");
 		pg_fatal("Your installation contains tables declared WITH OIDS, which is not\n"
 				 "supported anymore.  Consider removing the oid column using\n"
@@ -1234,7 +1226,9 @@ check_for_composite_data_type_usage(ClusterInfo *cluster)
 
 	prep_status("Checking for system-defined composite types in user tables");
 
-	snprintf(output_path, sizeof(output_path), "tables_using_composite.txt");
+	snprintf(output_path, sizeof(output_path), "%s/%s",
+			 log_opts.basedir,
+			 "tables_using_composite.txt");
 
 	/*
 	 * Look for composite types that were made during initdb *or* belong to
@@ -1291,7 +1285,9 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 
 	prep_status("Checking for reg* data types in user tables");
 
-	snprintf(output_path, sizeof(output_path), "tables_using_reg.txt");
+	snprintf(output_path, sizeof(output_path), "%s/%s",
+			 log_opts.basedir,
+			 "tables_using_reg.txt");
 
 	/*
 	 * Note: older servers will not have all of these reg* types, so we have
@@ -1331,6 +1327,33 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 		check_ok();
 }
 
+/*
+ * check_for_aclitem_data_type_usage
+ *
+ *	aclitem changed its storage format in 16, so check for it.
+ */
+static void
+check_for_aclitem_data_type_usage(ClusterInfo *cluster)
+{
+	char		output_path[MAXPGPATH];
+
+	prep_status("Checking for incompatible aclitem data type in user tables");
+
+	snprintf(output_path, sizeof(output_path), "tables_using_aclitem.txt");
+
+	if (check_for_data_type_usage(cluster, "pg_catalog.aclitem", output_path))
+	{
+		pg_log(PG_REPORT, "fatal");
+		pg_fatal("Your installation contains the \"aclitem\" data type in user tables.\n"
+				 "The internal format of \"aclitem\" changed in PostgreSQL version 16\n"
+				 "so this cluster cannot currently be upgraded.  You can drop the\n"
+				 "problem columns and restart the upgrade.  A list of the problem\n"
+				 "columns is in the file:\n"
+				 "    %s", output_path);
+	}
+	else
+		check_ok();
+}
 
 /*
  * check_for_jsonb_9_4_usage()
@@ -1344,7 +1367,9 @@ check_for_jsonb_9_4_usage(ClusterInfo *cluster)
 
 	prep_status("Checking for incompatible \"jsonb\" data type");
 
-	snprintf(output_path, sizeof(output_path), "tables_using_jsonb.txt");
+	snprintf(output_path, sizeof(output_path), "%s/%s",
+			 log_opts.basedir,
+			 "tables_using_jsonb.txt");
 
 	if (check_for_data_type_usage(cluster, "pg_catalog.jsonb", output_path))
 	{
@@ -1370,27 +1395,52 @@ check_for_pg_role_prefix(ClusterInfo *cluster)
 {
 	PGresult   *res;
 	PGconn	   *conn = connectToServer(cluster, "template1");
+	int			ntups;
+	int			i_roloid;
+	int			i_rolname;
+	FILE	   *script = NULL;
+	char		output_path[MAXPGPATH];
 
 	prep_status("Checking for roles starting with \"pg_\"");
 
+	snprintf(output_path, sizeof(output_path), "%s/%s",
+			 log_opts.basedir,
+			 "pg_role_prefix.txt");
+
 	res = executeQueryOrDie(conn,
-							"SELECT * "
+							"SELECT oid AS roloid, rolname "
 							"FROM pg_catalog.pg_roles "
 							"WHERE rolname ~ '^pg_'");
 
-	if (PQntuples(res) != 0)
+	ntups = PQntuples(res);
+	i_roloid = PQfnumber(res, "roloid");
+	i_rolname = PQfnumber(res, "rolname");
+	for (int rowno = 0; rowno < ntups; rowno++)
 	{
-		if (cluster == &old_cluster)
-			pg_fatal("The source cluster contains roles starting with \"pg_\"");
-		else
-			pg_fatal("The target cluster contains roles starting with \"pg_\"");
+		if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
+			pg_fatal("could not open file \"%s\": %s",
+					 output_path, strerror(errno));
+		fprintf(script, "%s (oid=%s)\n",
+				PQgetvalue(res, rowno, i_rolname),
+				PQgetvalue(res, rowno, i_roloid));
 	}
 
 	PQclear(res);
 
 	PQfinish(conn);
 
-	check_ok();
+	if (script)
+	{
+		fclose(script);
+		pg_log(PG_REPORT, "fatal");
+		pg_fatal("Your installation contains roles starting with \"pg_\".\n"
+				 "\"pg_\" is a reserved prefix for system roles, the cluster\n"
+				 "cannot be upgraded until these roles are renamed.\n"
+				 "A list of roles starting with \"pg_\" is in the file:\n"
+				 "    %s", output_path);
+	}
+	else
+		check_ok();
 }
 
 /*
@@ -1401,7 +1451,6 @@ check_for_user_defined_encoding_conversions(ClusterInfo *cluster)
 {
 	int			dbnum;
 	FILE	   *script = NULL;
-	bool		found = false;
 	char		output_path[MAXPGPATH];
 
 	prep_status("Checking for user-defined encoding conversions");
@@ -1441,7 +1490,6 @@ check_for_user_defined_encoding_conversions(ClusterInfo *cluster)
 		i_nspname = PQfnumber(res, "nspname");
 		for (rowno = 0; rowno < ntups; rowno++)
 		{
-			found = true;
 			if (script == NULL &&
 				(script = fopen_priv(output_path, "w")) == NULL)
 				pg_fatal("could not open file \"%s\": %s",
@@ -1463,10 +1511,8 @@ check_for_user_defined_encoding_conversions(ClusterInfo *cluster)
 	}
 
 	if (script)
-		fclose(script);
-
-	if (found)
 	{
+		fclose(script);
 		pg_log(PG_REPORT, "fatal");
 		pg_fatal("Your installation contains user-defined encoding conversions.\n"
 				 "The conversion function parameters changed in PostgreSQL version 14\n"

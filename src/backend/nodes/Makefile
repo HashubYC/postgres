@@ -21,6 +21,7 @@ OBJS = \
 	extensible.o \
 	list.o \
 	makefuncs.o \
+	multibitmapset.o \
 	nodeFuncs.o \
 	nodes.o \
 	outfuncs.o \
@@ -52,8 +53,10 @@ node_headers = \
 	commands/trigger.h \
 	executor/tuptable.h \
 	foreign/fdwapi.h \
+	nodes/bitmapset.h \
 	nodes/extensible.h \
 	nodes/lockoptions.h \
+	nodes/miscnodes.h \
 	nodes/replnodes.h \
 	nodes/supportnodes.h \
 	nodes/value.h \

@@ -615,11 +615,11 @@ call_pltcl_start_proc(Oid prolang, bool pltrusted)
 	error_context_stack = &errcallback;
 
 	/* Parse possibly-qualified identifier and look up the function */
-	namelist = stringToQualifiedNameList(start_proc);
+	namelist = stringToQualifiedNameList(start_proc, NULL);
 	procOid = LookupFuncName(namelist, 0, NULL, false);
 
 	/* Current user must have permission to call function */
-	aclresult = pg_proc_aclcheck(procOid, GetUserId(), ACL_EXECUTE);
+	aclresult = object_aclcheck(ProcedureRelationId, procOid, GetUserId(), ACL_EXECUTE);
 	if (aclresult != ACLCHECK_OK)
 		aclcheck_error(aclresult, OBJECT_FUNCTION, start_proc);
 
@@ -2603,7 +2603,8 @@ pltcl_SPI_prepare(ClientData cdata, Tcl_Interp *interp,
 						typIOParam;
 			int32		typmod;
 
-			parseTypeString(Tcl_GetString(argsObj[i]), &typId, &typmod, false);
+			(void) parseTypeString(Tcl_GetString(argsObj[i]),
+								   &typId, &typmod, NULL);
 
 			getTypeInputInfo(typId, &typInput, &typIOParam);
 

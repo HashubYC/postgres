@@ -3,7 +3,7 @@
  * relcache.c
  *	  POSTGRES relation descriptor cache code
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -41,6 +41,7 @@
 #include "access/tupdesc_details.h"
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -846,8 +847,8 @@ RelationBuildRuleLock(Relation relation)
 
 		/*
 		 * Scan through the rule's actions and set the checkAsUser field on
-		 * all rtable entries. We have to look at the qual as well, in case it
-		 * contains sublinks.
+		 * all RTEPermissionInfos. We have to look at the qual as well, in
+		 * case it contains sublinks.
 		 *
 		 * The reason for doing this when the rule is loaded, rather than when
 		 * it is stored, is that otherwise ALTER TABLE OWNER would have to
@@ -2660,6 +2661,13 @@ RelationClearRelation(Relation relation, bool rebuild)
 			elog(ERROR, "relation %u deleted while still in use", save_relid);
 		}
 
+		/*
+		 * If we were to, again, have cases of the relkind of a relcache entry
+		 * changing, we would need to ensure that pgstats does not get
+		 * confused.
+		 */
+		Assert(relation->rd_rel->relkind == newrel->rd_rel->relkind);
+
 		keep_tupdesc = equalTupleDescs(relation->rd_att, newrel->rd_att);
 		keep_rules = equalRuleLocks(relation->rd_rules, newrel->rd_rules);
 		keep_policies = equalRSDesc(relation->rd_rsdesc, newrel->rd_rsdesc);
@@ -3473,7 +3481,7 @@ RelationBuildLocalRelation(const char *relname,
 	bool		has_not_null;
 	bool		nailit;
 
-	AssertArg(natts >= 0);
+	Assert(natts >= 0);
 
 	/*
 	 * check for creation of a rel that must be nailed in cache.
@@ -3707,9 +3715,36 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	TransactionId freezeXid = InvalidTransactionId;
 	RelFileLocator newrlocator;
 
-	/* Allocate a new relfilenumber */
-	newrelfilenumber = GetNewRelFileNumber(relation->rd_rel->reltablespace,
-										   NULL, persistence);
+	if (!IsBinaryUpgrade)
+	{
+		/* Allocate a new relfilenumber */
+		newrelfilenumber = GetNewRelFileNumber(relation->rd_rel->reltablespace,
+											   NULL, persistence);
+	}
+	else if (relation->rd_rel->relkind == RELKIND_INDEX)
+	{
+		if (!OidIsValid(binary_upgrade_next_index_pg_class_relfilenumber))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("index relfilenumber value not set when in binary upgrade mode")));
+
+		newrelfilenumber = binary_upgrade_next_index_pg_class_relfilenumber;
+		binary_upgrade_next_index_pg_class_relfilenumber = InvalidOid;
+	}
+	else if (relation->rd_rel->relkind == RELKIND_RELATION)
+	{
+		if (!OidIsValid(binary_upgrade_next_heap_pg_class_relfilenumber))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("heap relfilenumber value not set when in binary upgrade mode")));
+
+		newrelfilenumber = binary_upgrade_next_heap_pg_class_relfilenumber;
+		binary_upgrade_next_heap_pg_class_relfilenumber = InvalidOid;
+	}
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unexpected request for new relfilenumber in binary upgrade mode")));
 
 	/*
 	 * Get a writable copy of the pg_class tuple for the given relation.
@@ -3724,9 +3759,37 @@ RelationSetNewRelfilenumber(Relation relation, char persistence)
 	classform = (Form_pg_class) GETSTRUCT(tuple);
 
 	/*
-	 * Schedule unlinking of the old storage at transaction commit.
+	 * Schedule unlinking of the old storage at transaction commit, except
+	 * when performing a binary upgrade, when we must do it immediately.
 	 */
-	RelationDropStorage(relation);
+	if (IsBinaryUpgrade)
+	{
+		SMgrRelation	srel;
+
+		/*
+		 * During a binary upgrade, we use this code path to ensure that
+		 * pg_largeobject and its index have the same relfilenumbers as in
+		 * the old cluster. This is necessary because pg_upgrade treats
+		 * pg_largeobject like a user table, not a system table. It is however
+		 * possible that a table or index may need to end up with the same
+		 * relfilenumber in the new cluster as what it had in the old cluster.
+		 * Hence, we can't wait until commit time to remove the old storage.
+		 *
+		 * In general, this function needs to have transactional semantics,
+		 * and removing the old storage before commit time surely isn't.
+		 * However, it doesn't really matter, because if a binary upgrade
+		 * fails at this stage, the new cluster will need to be recreated
+		 * anyway.
+		 */
+		srel = smgropen(relation->rd_locator, relation->rd_backend);
+		smgrdounlinkall(&srel, 1, false);
+		smgrclose(srel);
+	}
+	else
+	{
+		/* Not a binary upgrade, so just schedule it to happen later. */
+		RelationDropStorage(relation);
+	}
 
 	/*
 	 * Create storage for the main fork of the new relfilenumber.  If it's a

@@ -3,7 +3,7 @@
  * tsgistidx.c
  *	  GiST support functions for tsvector_ops
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -87,10 +87,12 @@ static int32 sizebitvec(BITVECP sign, int siglen);
 Datum
 gtsvectorin(PG_FUNCTION_ARGS)
 {
+	/* There's no need to support input of gtsvectors */
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("gtsvector_in not implemented")));
-	PG_RETURN_DATUM(0);
+			 errmsg("cannot accept a value of type %s", "gtsvector")));
+
+	PG_RETURN_VOID();			/* keep compiler quiet */
 }
 
 #define SINGOUTSTR	"%d true bits, %d false bits"
@@ -102,7 +104,7 @@ static int	outbuf_maxlen = 0;
 Datum
 gtsvectorout(PG_FUNCTION_ARGS)
 {
-	SignTSVector *key = (SignTSVector *) PG_DETOAST_DATUM(PG_GETARG_POINTER(0));
+	SignTSVector *key = (SignTSVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
 	char	   *outbuf;
 
 	if (outbuf_maxlen == 0)
@@ -700,7 +702,7 @@ gtsvector_picksplit(PG_FUNCTION_ARGS)
 		costvector[j - 1].pos = j;
 		size_alpha = hemdistcache(&(cache[seed_1]), &(cache[j]), siglen);
 		size_beta = hemdistcache(&(cache[seed_2]), &(cache[j]), siglen);
-		costvector[j - 1].cost = Abs(size_alpha - size_beta);
+		costvector[j - 1].cost = abs(size_alpha - size_beta);
 	}
 	qsort((void *) costvector, maxoff, sizeof(SPLITCOST), comparecost);
 

@@ -22,7 +22,7 @@
  * tuples (unless buffering mode is disabled).
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -162,7 +162,7 @@ static BlockNumber gistbufferinginserttuples(GISTBuildState *buildstate,
 											 BlockNumber parentblk, OffsetNumber downlinkoffnum);
 static Buffer gistBufferingFindCorrectParent(GISTBuildState *buildstate,
 											 BlockNumber childblkno, int level,
-											 BlockNumber *parentblk,
+											 BlockNumber *parentblkno,
 											 OffsetNumber *downlinkoffnum);
 static void gistProcessEmptyingQueue(GISTBuildState *buildstate);
 static void gistEmptyAllBuffers(GISTBuildState *buildstate);
@@ -171,7 +171,8 @@ static int	gistGetMaxLevel(Relation index);
 static void gistInitParentMap(GISTBuildState *buildstate);
 static void gistMemorizeParent(GISTBuildState *buildstate, BlockNumber child,
 							   BlockNumber parent);
-static void gistMemorizeAllDownlinks(GISTBuildState *buildstate, Buffer parent);
+static void gistMemorizeAllDownlinks(GISTBuildState *buildstate,
+									 Buffer parentbuf);
 static BlockNumber gistGetParent(GISTBuildState *buildstate, BlockNumber child);
 
 

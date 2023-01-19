@@ -8,7 +8,7 @@
  * "x" to be considered equal() to another reference to "x" in the query.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -143,6 +143,12 @@ _equalA_Const(const A_Const *a, const A_Const *b)
 	COMPARE_LOCATION_FIELD(location);
 
 	return true;
+}
+
+static bool
+_equalBitmapset(const Bitmapset *a, const Bitmapset *b)
+{
+	return bms_equal(a, b);
 }
 
 /*

@@ -3,7 +3,7 @@
  * fd.c
  *	  Virtual file descriptor code.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -75,6 +75,7 @@
 #include <dirent.h>
 #include <sys/file.h>
 #include <sys/param.h>
+#include <sys/resource.h>		/* for getrlimit */
 #include <sys/stat.h>
 #include <sys/types.h>
 #ifndef WIN32
@@ -83,9 +84,6 @@
 #include <limits.h>
 #include <unistd.h>
 #include <fcntl.h>
-#ifdef HAVE_SYS_RESOURCE_H
-#include <sys/resource.h>		/* for getrlimit */
-#endif
 
 #include "access/xact.h"
 #include "access/xlog.h"
@@ -95,7 +93,6 @@
 #include "common/pg_prng.h"
 #include "miscadmin.h"
 #include "pgstat.h"
-#include "port/pg_iovec.h"
 #include "portability/mem.h"
 #include "postmaster/startup.h"
 #include "storage/fd.h"
@@ -442,20 +439,12 @@ pg_fsync_writethrough(int fd)
 
 /*
  * pg_fdatasync --- same as fdatasync except does nothing if enableFsync is off
- *
- * Not all platforms have fdatasync; treat as fsync if not available.
  */
 int
 pg_fdatasync(int fd)
 {
 	if (enableFsync)
-	{
-#ifdef HAVE_FDATASYNC
 		return fdatasync(fd);
-#else
-		return fsync(fd);
-#endif
-	}
 	else
 		return 0;
 }
@@ -649,7 +638,7 @@ pg_truncate(const char *path, off_t length)
 	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
 	if (fd >= 0)
 	{
-		ret = ftruncate(fd, 0);
+		ret = ftruncate(fd, length);
 		save_errno = errno;
 		CloseTransientFile(fd);
 		errno = save_errno;
@@ -895,11 +884,7 @@ count_usable_fds(int max_to_probe, int *usable_fds, int *already_open)
 	fd = (int *) palloc(size * sizeof(int));
 
 #ifdef HAVE_GETRLIMIT
-#ifdef RLIMIT_NOFILE			/* most platforms use RLIMIT_NOFILE */
 	getrlimit_status = getrlimit(RLIMIT_NOFILE, &rlim);
-#else							/* but BSD doesn't ... */
-	getrlimit_status = getrlimit(RLIMIT_OFILE, &rlim);
-#endif							/* RLIMIT_NOFILE */
 	if (getrlimit_status != 0)
 		ereport(WARNING, (errmsg("getrlimit failed: %m")));
 #endif							/* HAVE_GETRLIMIT */
@@ -992,7 +977,7 @@ set_max_safe_fds(void)
 		ereport(FATAL,
 				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
 				 errmsg("insufficient file descriptors available to start server process"),
-				 errdetail("System allows %d, we need at least %d.",
+				 errdetail("System allows %d, server needs at least %d.",
 						   max_safe_fds + NUM_RESERVED_FDS,
 						   FD_MINFREE + NUM_RESERVED_FDS)));
 
@@ -1995,7 +1980,7 @@ FileClose(File file)
  * to read into.
  */
 int
-FilePrefetch(File file, off_t offset, int amount, uint32 wait_event_info)
+FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info)
 {
 #if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)
 	int			returnCode;
@@ -2046,7 +2031,7 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 }
 
 int
-FileRead(File file, char *buffer, int amount, off_t offset,
+FileRead(File file, void *buffer, size_t amount, off_t offset,
 		 uint32 wait_event_info)
 {
 	int			returnCode;
@@ -2054,7 +2039,7 @@ FileRead(File file, char *buffer, int amount, off_t offset,
 
 	Assert(FileIsValid(file));
 
-	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %d %p",
+	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
@@ -2102,7 +2087,7 @@ retry:
 }
 
 int
-FileWrite(File file, char *buffer, int amount, off_t offset,
+FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 		  uint32 wait_event_info)
 {
 	int			returnCode;
@@ -2517,8 +2502,7 @@ OpenPipeStream(const char *command, const char *mode)
 	ReleaseLruFiles();
 
 TryAgain:
-	fflush(stdout);
-	fflush(stderr);
+	fflush(NULL);
 	pqsignal(SIGPIPE, SIG_DFL);
 	errno = 0;
 	file = popen(command, mode);
@@ -3171,17 +3155,11 @@ RemovePgTempFilesInDir(const char *tmpdirname, bool missing_ok, bool unlink_all)
 					PG_TEMP_FILE_PREFIX,
 					strlen(PG_TEMP_FILE_PREFIX)) == 0)
 		{
-			struct stat statbuf;
+			PGFileType	type = get_dirent_type(rm_path, temp_de, false, LOG);
 
-			if (lstat(rm_path, &statbuf) < 0)
-			{
-				ereport(LOG,
-						(errcode_for_file_access(),
-						 errmsg("could not stat file \"%s\": %m", rm_path)));
+			if (type == PGFILETYPE_ERROR)
 				continue;
-			}
-
-			if (S_ISDIR(statbuf.st_mode))
+			else if (type == PGFILETYPE_DIR)
 			{
 				/* recursively remove contents, then directory itself */
 				RemovePgTempFilesInDir(rm_path, false, true);
@@ -3377,7 +3355,6 @@ SyncDataDirectory(void)
 	 */
 	xlog_is_symlink = false;
 
-#ifndef WIN32
 	{
 		struct stat st;
 
@@ -3389,10 +3366,6 @@ SyncDataDirectory(void)
 		else if (S_ISLNK(st.st_mode))
 			xlog_is_symlink = true;
 	}
-#else
-	if (pgwin32_is_junction("pg_wal"))
-		xlog_is_symlink = true;
-#endif
 
 #ifdef HAVE_SYNCFS
 	if (recovery_init_sync_method == RECOVERY_INIT_SYNC_METHOD_SYNCFS)
@@ -3763,68 +3736,4 @@ int
 data_sync_elevel(int elevel)
 {
 	return data_sync_retry ? elevel : PANIC;
-}
-
-/*
- * A convenience wrapper for pg_pwritev() that retries on partial write.  If an
- * error is returned, it is unspecified how much has been written.
- */
-ssize_t
-pg_pwritev_with_retry(int fd, const struct iovec *iov, int iovcnt, off_t offset)
-{
-	struct iovec iov_copy[PG_IOV_MAX];
-	ssize_t		sum = 0;
-	ssize_t		part;
-
-	/* We'd better have space to make a copy, in case we need to retry. */
-	if (iovcnt > PG_IOV_MAX)
-	{
-		errno = EINVAL;
-		return -1;
-	}
-
-	for (;;)
-	{
-		/* Write as much as we can. */
-		part = pg_pwritev(fd, iov, iovcnt, offset);
-		if (part < 0)
-			return -1;
-
-#ifdef SIMULATE_SHORT_WRITE
-		part = Min(part, 4096);
-#endif
-
-		/* Count our progress. */
-		sum += part;
-		offset += part;
-
-		/* Step over iovecs that are done. */
-		while (iovcnt > 0 && iov->iov_len <= part)
-		{
-			part -= iov->iov_len;
-			++iov;
-			--iovcnt;
-		}
-
-		/* Are they all done? */
-		if (iovcnt == 0)
-		{
-			/* We don't expect the kernel to write more than requested. */
-			Assert(part == 0);
-			break;
-		}
-
-		/*
-		 * Move whatever's left to the front of our mutable copy and adjust
-		 * the leading iovec.
-		 */
-		Assert(iovcnt > 0);
-		memmove(iov_copy, iov, sizeof(*iov) * iovcnt);
-		Assert(iov->iov_len > part);
-		iov_copy[0].iov_base = (char *) iov_copy[0].iov_base + part;
-		iov_copy[0].iov_len -= part;
-		iov = iov_copy;
-	}
-
-	return sum;
 }

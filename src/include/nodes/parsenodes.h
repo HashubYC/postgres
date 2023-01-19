@@ -12,7 +12,7 @@
  * identifying statement boundaries in multi-statement source strings.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/parsenodes.h
@@ -22,6 +22,7 @@
 #ifndef PARSENODES_H
 #define PARSENODES_H
 
+#include "common/relpath.h"
 #include "nodes/bitmapset.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
@@ -72,12 +73,12 @@ typedef enum SetQuantifier
 
 /*
  * Grantable rights are encoded so that we can OR them together in a bitmask.
- * The present representation of AclItem limits us to 16 distinct rights,
- * even though AclMode is defined as uint32.  See utils/acl.h.
+ * The present representation of AclItem limits us to 32 distinct rights,
+ * even though AclMode is defined as uint64.  See utils/acl.h.
  *
  * Caution: changing these codes breaks stored ACLs, hence forces initdb.
  */
-typedef uint32 AclMode;			/* a bitmask of privilege bits */
+typedef uint64 AclMode;			/* a bitmask of privilege bits */
 
 #define ACL_INSERT		(1<<0)	/* for relations */
 #define ACL_SELECT		(1<<1)
@@ -94,7 +95,8 @@ typedef uint32 AclMode;			/* a bitmask of privilege bits */
 #define ACL_CONNECT		(1<<11) /* for databases */
 #define ACL_SET			(1<<12) /* for configuration parameters */
 #define ACL_ALTER_SYSTEM (1<<13)	/* for configuration parameters */
-#define N_ACL_RIGHTS	14		/* 1 plus the last 1<<x */
+#define ACL_MAINTAIN		(1<<14) /* for relations */
+#define N_ACL_RIGHTS	15		/* 1 plus the last 1<<x */
 #define ACL_NO_RIGHTS	0
 /* Currently, SELECT ... FOR [KEY] UPDATE/SHARE requires UPDATE privileges */
 #define ACL_SELECT_FOR_UPDATE	ACL_UPDATE
@@ -151,6 +153,8 @@ typedef struct Query
 	List	   *cteList;		/* WITH list (of CommonTableExpr's) */
 
 	List	   *rtable;			/* list of range table entries */
+	List	   *rteperminfos;	/* list of RTEPermissionInfo nodes for the
+								 * rtable entries having perminfoindex > 0 */
 	FromExpr   *jointree;		/* table join tree (FROM and WHERE clauses);
 								 * also USING clause for MERGE */
 
@@ -291,7 +295,7 @@ typedef enum A_Expr_Kind
 
 typedef struct A_Expr
 {
-	pg_node_attr(custom_read_write, no_read)
+	pg_node_attr(custom_read_write)
 
 	NodeTag		type;
 	A_Expr_Kind kind;			/* see above */
@@ -319,7 +323,7 @@ union ValUnion
 
 typedef struct A_Const
 {
-	pg_node_attr(custom_copy_equal, custom_read_write, no_read)
+	pg_node_attr(custom_copy_equal, custom_read_write)
 
 	NodeTag		type;
 	union ValUnion val;
@@ -826,6 +830,13 @@ typedef struct PartitionElem
 	int			location;		/* token location, or -1 if unknown */
 } PartitionElem;
 
+typedef enum PartitionStrategy
+{
+	PARTITION_STRATEGY_LIST = 'l',
+	PARTITION_STRATEGY_RANGE = 'r',
+	PARTITION_STRATEGY_HASH = 'h'
+} PartitionStrategy;
+
 /*
  * PartitionSpec - parse-time representation of a partition key specification
  *
@@ -834,16 +845,10 @@ typedef struct PartitionElem
 typedef struct PartitionSpec
 {
 	NodeTag		type;
-	char	   *strategy;		/* partitioning strategy ('hash', 'list' or
-								 * 'range') */
+	PartitionStrategy strategy;
 	List	   *partParams;		/* List of PartitionElems */
 	int			location;		/* token location, or -1 if unknown */
 } PartitionSpec;
-
-/* Internal codes for partitioning strategies */
-#define PARTITION_STRATEGY_HASH		'h'
-#define PARTITION_STRATEGY_LIST		'l'
-#define PARTITION_STRATEGY_RANGE	'r'
 
 /*
  * PartitionBoundSpec - a partition bound specification
@@ -964,37 +969,6 @@ typedef struct PartitionCmd
  *	  control visibility.  But it is needed by ruleutils.c to determine
  *	  whether RTEs should be shown in decompiled queries.
  *
- *	  requiredPerms and checkAsUser specify run-time access permissions
- *	  checks to be performed at query startup.  The user must have *all*
- *	  of the permissions that are OR'd together in requiredPerms (zero
- *	  indicates no permissions checking).  If checkAsUser is not zero,
- *	  then do the permissions checks using the access rights of that user,
- *	  not the current effective user ID.  (This allows rules to act as
- *	  setuid gateways.)  Permissions checks only apply to RELATION RTEs.
- *
- *	  For SELECT/INSERT/UPDATE permissions, if the user doesn't have
- *	  table-wide permissions then it is sufficient to have the permissions
- *	  on all columns identified in selectedCols (for SELECT) and/or
- *	  insertedCols and/or updatedCols (INSERT with ON CONFLICT DO UPDATE may
- *	  have all 3).  selectedCols, insertedCols and updatedCols are bitmapsets,
- *	  which cannot have negative integer members, so we subtract
- *	  FirstLowInvalidHeapAttributeNumber from column numbers before storing
- *	  them in these fields.  A whole-row Var reference is represented by
- *	  setting the bit for InvalidAttrNumber.
- *
- *	  updatedCols is also used in some other places, for example, to determine
- *	  which triggers to fire and in FDWs to know which changed columns they
- *	  need to ship off.
- *
- *	  Generated columns that are caused to be updated by an update to a base
- *	  column are listed in extraUpdatedCols.  This is not considered for
- *	  permission checking, but it is useful in those places that want to know
- *	  the full set of columns being updated as opposed to only the ones the
- *	  user explicitly mentioned in the query.  (There is currently no need for
- *	  an extraInsertedCols, but it could exist.)  Note that extraUpdatedCols
- *	  is populated during query rewrite, NOT in the parser, since generated
- *	  columns could be added after a rule has been parsed and stored.
- *
  *	  securityQuals is a list of security barrier quals (boolean expressions),
  *	  to be tested in the listed order before returning a row from the
  *	  relation.  It is always NIL in parser output.  Entries are added by the
@@ -1035,26 +1009,39 @@ typedef struct RangeTblEntry
 	/*
 	 * Fields valid for a plain relation RTE (else zero):
 	 *
-	 * As a special case, RTE_NAMEDTUPLESTORE can also set relid to indicate
-	 * that the tuple format of the tuplestore is the same as the referenced
-	 * relation.  This allows plans referencing AFTER trigger transition
-	 * tables to be invalidated if the underlying table is altered.
-	 *
 	 * rellockmode is really LOCKMODE, but it's declared int to avoid having
 	 * to include lock-related headers here.  It must be RowExclusiveLock if
-	 * the RTE is an INSERT/UPDATE/DELETE target, else RowShareLock if the RTE
-	 * is a SELECT FOR UPDATE/FOR SHARE target, else AccessShareLock.
+	 * the RTE is an INSERT/UPDATE/DELETE/MERGE target, else RowShareLock if
+	 * the RTE is a SELECT FOR UPDATE/FOR SHARE target, else AccessShareLock.
 	 *
 	 * Note: in some cases, rule expansion may result in RTEs that are marked
 	 * with RowExclusiveLock even though they are not the target of the
 	 * current query; this happens if a DO ALSO rule simply scans the original
 	 * target table.  We leave such RTEs with their original lockmode so as to
 	 * avoid getting an additional, lesser lock.
+	 *
+	 * perminfoindex is 1-based index of the RTEPermissionInfo belonging to
+	 * this RTE in the containing struct's list of same; 0 if permissions need
+	 * not be checked for this RTE.
+	 *
+	 * As a special case, relid, rellockmode, and perminfoindex can also be
+	 * set (nonzero) in an RTE_SUBQUERY RTE.  This occurs when we convert an
+	 * RTE_RELATION RTE naming a view into an RTE_SUBQUERY containing the
+	 * view's query.  We still need to perform run-time locking and permission
+	 * checks on the view, even though it's not directly used in the query
+	 * anymore, and the most expedient way to do that is to retain these
+	 * fields from the old state of the RTE.
+	 *
+	 * As a special case, RTE_NAMEDTUPLESTORE can also set relid to indicate
+	 * that the tuple format of the tuplestore is the same as the referenced
+	 * relation.  This allows plans referencing AFTER trigger transition
+	 * tables to be invalidated if the underlying table is altered.
 	 */
 	Oid			relid;			/* OID of the relation */
 	char		relkind;		/* relation kind (see pg_class.relkind) */
 	int			rellockmode;	/* lock level that query requires on the rel */
 	struct TableSampleClause *tablesample;	/* sampling info, or NULL */
+	Index		perminfoindex;
 
 	/*
 	 * Fields valid for a subquery RTE (else NULL):
@@ -1174,14 +1161,54 @@ typedef struct RangeTblEntry
 	bool		lateral;		/* subquery, function, or values is LATERAL? */
 	bool		inh;			/* inheritance requested? */
 	bool		inFromCl;		/* present in FROM clause? */
+	List	   *securityQuals;	/* security barrier quals to apply, if any */
+} RangeTblEntry;
+
+/*
+ * RTEPermissionInfo
+ * 		Per-relation information for permission checking. Added to the Query
+ * 		node by the parser when adding the corresponding RTE to the query
+ * 		range table and subsequently editorialized on by the rewriter if
+ * 		needed after rule expansion.
+ *
+ * Only the relations directly mentioned in the query are checked for
+ * accesss permissions by the core executor, so only their RTEPermissionInfos
+ * are present in the Query.  However, extensions may want to check inheritance
+ * children too, depending on the value of rte->inh, so it's copied in 'inh'
+ * for their perusal.
+ *
+ * requiredPerms and checkAsUser specify run-time access permissions checks
+ * to be performed at query startup.  The user must have *all* of the
+ * permissions that are OR'd together in requiredPerms (never 0!).  If
+ * checkAsUser is not zero, then do the permissions checks using the access
+ * rights of that user, not the current effective user ID.  (This allows rules
+ * to act as setuid gateways.)
+ *
+ * For SELECT/INSERT/UPDATE permissions, if the user doesn't have table-wide
+ * permissions then it is sufficient to have the permissions on all columns
+ * identified in selectedCols (for SELECT) and/or insertedCols and/or
+ * updatedCols (INSERT with ON CONFLICT DO UPDATE may have all 3).
+ * selectedCols, insertedCols and updatedCols are bitmapsets, which cannot have
+ * negative integer members, so we subtract FirstLowInvalidHeapAttributeNumber
+ * from column numbers before storing them in these fields.  A whole-row Var
+ * reference is represented by setting the bit for InvalidAttrNumber.
+ *
+ * updatedCols is also used in some other places, for example, to determine
+ * which triggers to fire and in FDWs to know which changed columns they need
+ * to ship off.
+ */
+typedef struct RTEPermissionInfo
+{
+	NodeTag		type;
+
+	Oid			relid;			/* relation OID */
+	bool		inh;			/* separately check inheritance children? */
 	AclMode		requiredPerms;	/* bitmask of required access permissions */
 	Oid			checkAsUser;	/* if valid, check access as this role */
 	Bitmapset  *selectedCols;	/* columns needing SELECT permission */
 	Bitmapset  *insertedCols;	/* columns needing INSERT permission */
 	Bitmapset  *updatedCols;	/* columns needing UPDATE permission */
-	Bitmapset  *extraUpdatedCols;	/* generated columns being updated */
-	List	   *securityQuals;	/* security barrier quals to apply, if any */
-} RangeTblEntry;
+} RTEPermissionInfo;
 
 /*
  * RangeTblFunction -
@@ -1606,293 +1633,6 @@ typedef struct TriggerTransition
 	bool		isTable;
 } TriggerTransition;
 
-/* Nodes for SQL/JSON support */
-
-/*
- * JsonQuotes -
- *		representation of [KEEP|OMIT] QUOTES clause for JSON_QUERY()
- */
-typedef enum JsonQuotes
-{
-	JS_QUOTES_UNSPEC,			/* unspecified */
-	JS_QUOTES_KEEP,				/* KEEP QUOTES */
-	JS_QUOTES_OMIT				/* OMIT QUOTES */
-} JsonQuotes;
-
-/*
- * JsonTableColumnType -
- *		enumeration of JSON_TABLE column types
- */
-typedef enum JsonTableColumnType
-{
-	JTC_FOR_ORDINALITY,
-	JTC_REGULAR,
-	JTC_EXISTS,
-	JTC_FORMATTED,
-	JTC_NESTED,
-} JsonTableColumnType;
-
-/*
- * JsonOutput -
- *		representation of JSON output clause (RETURNING type [FORMAT format])
- */
-typedef struct JsonOutput
-{
-	NodeTag		type;
-	TypeName   *typeName;		/* RETURNING type name, if specified */
-	JsonReturning *returning;	/* RETURNING FORMAT clause and type Oids */
-} JsonOutput;
-
-/*
- * JsonArgument -
- *		representation of argument from JSON PASSING clause
- */
-typedef struct JsonArgument
-{
-	NodeTag		type;
-	JsonValueExpr *val;			/* argument value expression */
-	char	   *name;			/* argument name */
-} JsonArgument;
-
-/*
- * JsonCommon -
- *		representation of common syntax of functions using JSON path
- */
-typedef struct JsonCommon
-{
-	NodeTag		type;
-	JsonValueExpr *expr;		/* context item expression */
-	Node	   *pathspec;		/* JSON path specification expression */
-	char	   *pathname;		/* path name, if any */
-	List	   *passing;		/* list of PASSING clause arguments, if any */
-	int			location;		/* token location, or -1 if unknown */
-} JsonCommon;
-
-/*
- * JsonFuncExpr -
- *		untransformed representation of JSON function expressions
- */
-typedef struct JsonFuncExpr
-{
-	NodeTag		type;
-	JsonExprOp	op;				/* expression type */
-	JsonCommon *common;			/* common syntax */
-	JsonOutput *output;			/* output clause, if specified */
-	JsonBehavior *on_empty;		/* ON EMPTY behavior, if specified */
-	JsonBehavior *on_error;		/* ON ERROR behavior, if specified */
-	JsonWrapper wrapper;		/* array wrapper behavior (JSON_QUERY only) */
-	bool		omit_quotes;	/* omit or keep quotes? (JSON_QUERY only) */
-	int			location;		/* token location, or -1 if unknown */
-} JsonFuncExpr;
-
-/*
- * JsonTableColumn -
- *		untransformed representation of JSON_TABLE column
- */
-typedef struct JsonTableColumn
-{
-	NodeTag		type;
-	JsonTableColumnType coltype;	/* column type */
-	char	   *name;			/* column name */
-	TypeName   *typeName;		/* column type name */
-	char	   *pathspec;		/* path specification, if any */
-	char	   *pathname;		/* path name, if any */
-	JsonFormat *format;			/* JSON format clause, if specified */
-	JsonWrapper wrapper;		/* WRAPPER behavior for formatted columns */
-	bool		omit_quotes;	/* omit or keep quotes on scalar strings? */
-	List	   *columns;		/* nested columns */
-	JsonBehavior *on_empty;		/* ON EMPTY behavior */
-	JsonBehavior *on_error;		/* ON ERROR behavior */
-	int			location;		/* token location, or -1 if unknown */
-} JsonTableColumn;
-
-/*
- * JsonTablePlanType -
- *		flags for JSON_TABLE plan node types representation
- */
-typedef enum JsonTablePlanType
-{
-	JSTP_DEFAULT,
-	JSTP_SIMPLE,
-	JSTP_JOINED,
-} JsonTablePlanType;
-
-/*
- * JsonTablePlanJoinType -
- *		flags for JSON_TABLE join types representation
- */
-typedef enum JsonTablePlanJoinType
-{
-	JSTPJ_INNER = 0x01,
-	JSTPJ_OUTER = 0x02,
-	JSTPJ_CROSS = 0x04,
-	JSTPJ_UNION = 0x08,
-} JsonTablePlanJoinType;
-
-typedef struct JsonTablePlan JsonTablePlan;
-
-/*
- * JsonTablePlan -
- *		untransformed representation of JSON_TABLE plan node
- */
-struct JsonTablePlan
-{
-	NodeTag		type;
-	JsonTablePlanType plan_type;	/* plan type */
-	JsonTablePlanJoinType join_type;	/* join type (for joined plan only) */
-	JsonTablePlan *plan1;		/* first joined plan */
-	JsonTablePlan *plan2;		/* second joined plan */
-	char	   *pathname;		/* path name (for simple plan only) */
-	int			location;		/* token location, or -1 if unknown */
-};
-
-/*
- * JsonTable -
- *		untransformed representation of JSON_TABLE
- */
-typedef struct JsonTable
-{
-	NodeTag		type;
-	JsonCommon *common;			/* common JSON path syntax fields */
-	List	   *columns;		/* list of JsonTableColumn */
-	JsonTablePlan *plan;		/* join plan, if specified */
-	JsonBehavior *on_error;		/* ON ERROR behavior, if specified */
-	Alias	   *alias;			/* table alias in FROM clause */
-	bool		lateral;		/* does it have LATERAL prefix? */
-	int			location;		/* token location, or -1 if unknown */
-} JsonTable;
-
-/*
- * JsonKeyValue -
- *		untransformed representation of JSON object key-value pair for
- *		JSON_OBJECT() and JSON_OBJECTAGG()
- */
-typedef struct JsonKeyValue
-{
-	NodeTag		type;
-	Expr	   *key;			/* key expression */
-	JsonValueExpr *value;		/* JSON value expression */
-} JsonKeyValue;
-
-/*
- * JsonParseExpr -
- *		untransformed representation of JSON()
- */
-typedef struct JsonParseExpr
-{
-	NodeTag		type;
-	JsonValueExpr *expr;		/* string expression */
-	JsonOutput *output;			/* RETURNING clause, if specified */
-	bool		unique_keys;	/* WITH UNIQUE KEYS? */
-	int			location;		/* token location, or -1 if unknown */
-} JsonParseExpr;
-
-/*
- * JsonScalarExpr -
- *		untransformed representation of JSON_SCALAR()
- */
-typedef struct JsonScalarExpr
-{
-	NodeTag		type;
-	Expr	   *expr;			/* scalar expression */
-	JsonOutput *output;			/* RETURNING clause, if specified */
-	int			location;		/* token location, or -1 if unknown */
-} JsonScalarExpr;
-
-/*
- * JsonSerializeExpr -
- *		untransformed representation of JSON_SERIALIZE() function
- */
-typedef struct JsonSerializeExpr
-{
-	NodeTag		type;
-	JsonValueExpr *expr;		/* json value expression */
-	JsonOutput *output;			/* RETURNING clause, if specified  */
-	int			location;		/* token location, or -1 if unknown */
-} JsonSerializeExpr;
-
-/*
- * JsonObjectConstructor -
- *		untransformed representation of JSON_OBJECT() constructor
- */
-typedef struct JsonObjectConstructor
-{
-	NodeTag		type;
-	List	   *exprs;			/* list of JsonKeyValue pairs */
-	JsonOutput *output;			/* RETURNING clause, if specified  */
-	bool		absent_on_null; /* skip NULL values? */
-	bool		unique;			/* check key uniqueness? */
-	int			location;		/* token location, or -1 if unknown */
-} JsonObjectConstructor;
-
-/*
- * JsonArrayConstructor -
- *		untransformed representation of JSON_ARRAY(element,...) constructor
- */
-typedef struct JsonArrayConstructor
-{
-	NodeTag		type;
-	List	   *exprs;			/* list of JsonValueExpr elements */
-	JsonOutput *output;			/* RETURNING clause, if specified  */
-	bool		absent_on_null; /* skip NULL elements? */
-	int			location;		/* token location, or -1 if unknown */
-} JsonArrayConstructor;
-
-/*
- * JsonArrayQueryConstructor -
- *		untransformed representation of JSON_ARRAY(subquery) constructor
- */
-typedef struct JsonArrayQueryConstructor
-{
-	NodeTag		type;
-	Node	   *query;			/* subquery */
-	JsonOutput *output;			/* RETURNING clause, if specified  */
-	JsonFormat *format;			/* FORMAT clause for subquery, if specified */
-	bool		absent_on_null; /* skip NULL elements? */
-	int			location;		/* token location, or -1 if unknown */
-} JsonArrayQueryConstructor;
-
-/*
- * JsonAggConstructor -
- *		common fields of untransformed representation of
- *		JSON_ARRAYAGG() and JSON_OBJECTAGG()
- */
-typedef struct JsonAggConstructor
-{
-	NodeTag		type;
-	JsonOutput *output;			/* RETURNING clause, if any */
-	Node	   *agg_filter;		/* FILTER clause, if any */
-	List	   *agg_order;		/* ORDER BY clause, if any */
-	struct WindowDef *over;		/* OVER clause, if any */
-	int			location;		/* token location, or -1 if unknown */
-} JsonAggConstructor;
-
-/*
- * JsonObjectAgg -
- *		untransformed representation of JSON_OBJECTAGG()
- */
-typedef struct JsonObjectAgg
-{
-	NodeTag		type;
-	JsonAggConstructor *constructor;	/* common fields */
-	JsonKeyValue *arg;			/* object key-value pair */
-	bool		absent_on_null; /* skip NULL values? */
-	bool		unique;			/* check key uniqueness? */
-} JsonObjectAgg;
-
-/*
- * JsonArrayAgg -
- *		untransformed representation of JSON_ARRRAYAGG()
- */
-typedef struct JsonArrayAgg
-{
-	NodeTag		type;
-	JsonAggConstructor *constructor;	/* common fields */
-	JsonValueExpr *arg;			/* array element expression */
-	bool		absent_on_null; /* skip NULL elements? */
-} JsonArrayAgg;
-
-
 /*****************************************************************************
  *		Raw Grammar Output Statements
  *****************************************************************************/
@@ -2236,7 +1976,6 @@ typedef struct AlterTableStmt
 typedef enum AlterTableType
 {
 	AT_AddColumn,				/* add column */
-	AT_AddColumnRecurse,		/* internal to commands/tablecmds.c */
 	AT_AddColumnToView,			/* implicitly via CREATE OR REPLACE VIEW */
 	AT_ColumnDefault,			/* alter column default */
 	AT_CookedColumnDefault,		/* add a pre-cooked column default */
@@ -2250,19 +1989,15 @@ typedef enum AlterTableType
 	AT_SetStorage,				/* alter column set storage */
 	AT_SetCompression,			/* alter column set compression */
 	AT_DropColumn,				/* drop column */
-	AT_DropColumnRecurse,		/* internal to commands/tablecmds.c */
 	AT_AddIndex,				/* add index */
 	AT_ReAddIndex,				/* internal to commands/tablecmds.c */
 	AT_AddConstraint,			/* add constraint */
-	AT_AddConstraintRecurse,	/* internal to commands/tablecmds.c */
 	AT_ReAddConstraint,			/* internal to commands/tablecmds.c */
 	AT_ReAddDomainConstraint,	/* internal to commands/tablecmds.c */
 	AT_AlterConstraint,			/* alter constraint */
 	AT_ValidateConstraint,		/* validate constraint */
-	AT_ValidateConstraintRecurse,	/* internal to commands/tablecmds.c */
 	AT_AddIndexConstraint,		/* add constraint using existing index */
 	AT_DropConstraint,			/* drop constraint */
-	AT_DropConstraintRecurse,	/* internal to commands/tablecmds.c */
 	AT_ReAddComment,			/* internal to commands/tablecmds.c */
 	AT_AlterColumnType,			/* alter column type */
 	AT_AlterColumnGenericOptions,	/* alter column OPTIONS (...) */
@@ -2328,6 +2063,7 @@ typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
 								 * constraint, or parent table */
 	DropBehavior behavior;		/* RESTRICT or CASCADE for DROP cases */
 	bool		missing_ok;		/* skip error if missing? */
+	bool		recurse;		/* exec-time recursion */
 } AlterTableCmd;
 
 
@@ -2450,7 +2186,7 @@ typedef struct GrantRoleStmt
 	List	   *granted_roles;	/* list of roles to be granted/revoked */
 	List	   *grantee_roles;	/* list of member roles to add/delete */
 	bool		is_grant;		/* true = GRANT, false = REVOKE */
-	bool		admin_opt;		/* with admin option */
+	List	   *opt;			/* options e.g. WITH GRANT OPTION */
 	RoleSpec   *grantor;		/* set grantor to other than current role */
 	DropBehavior behavior;		/* drop behavior (for REVOKE) */
 } GrantRoleStmt;
@@ -2513,6 +2249,7 @@ typedef struct VariableSetStmt
 	char	   *name;			/* variable to be set */
 	List	   *args;			/* List of A_Const nodes */
 	bool		is_local;		/* SET LOCAL? */
+	bool		user_set;
 } VariableSetStmt;
 
 /* ----------------------
@@ -2618,7 +2355,7 @@ typedef enum ConstrType			/* types of constraints */
 
 typedef struct Constraint
 {
-	pg_node_attr(custom_read_write, no_read)
+	pg_node_attr(custom_read_write)
 
 	NodeTag		type;
 	ConstrType	contype;		/* see above */

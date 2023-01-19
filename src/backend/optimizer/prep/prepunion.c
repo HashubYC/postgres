@@ -12,7 +12,7 @@
  * case, but most of the heavy lifting for that is done elsewhere,
  * notably in prepjointree.c and allpaths.c.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -653,15 +653,15 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	if (partial_paths_valid)
 	{
 		Path	   *ppath;
-		ListCell   *lc;
 		int			parallel_workers = 0;
 
 		/* Find the highest number of workers requested for any subpath. */
 		foreach(lc, partial_pathlist)
 		{
-			Path	   *path = lfirst(lc);
+			Path	   *subpath = lfirst(lc);
 
-			parallel_workers = Max(parallel_workers, path->parallel_workers);
+			parallel_workers = Max(parallel_workers,
+								   subpath->parallel_workers);
 		}
 		Assert(parallel_workers > 0);
 
